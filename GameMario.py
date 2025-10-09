@@ -41,8 +41,9 @@ SUNSET = pygame.Color(255, 109, 85)
 MOON_GLOW = pygame.Color(254, 248, 189)
 WHITE = pygame.Color("white")
 GOLD = pygame.Color(255, 210, 0)
-GRASS = pygame.Color(56, 188, 97)
+GRASS = pygame.Color(58, 196, 108)
 BRICK = pygame.Color(143, 86, 59)
+CRIMSON = pygame.Color(214, 65, 65)
 CYAN = pygame.Color(64, 224, 208)
 EMBER = pygame.Color(255, 120, 90)
 MINT = pygame.Color(140, 255, 214)
@@ -52,6 +53,11 @@ SMOKE = pygame.Color(210, 238, 255)
 STEEL = pygame.Color(130, 140, 160)
 NEON_GREEN = pygame.Color(120, 255, 180)
 SUN_FLOW = pygame.Color(255, 230, 120)
+PLASMA_BLUE = pygame.Color(88, 210, 255)
+PLASMA_CORE = pygame.Color(255, 255, 255)
+BOUNCY_CORAL = pygame.Color(255, 160, 140)
+BOUNCY_TOP = pygame.Color(255, 220, 200)
+VOID_PURPLE = pygame.Color(96, 60, 180)
 
 BACKGROUND_THEMES = [
     {
@@ -97,6 +103,18 @@ CAMERA_LERP = 0.12
 ENEMY_DEATH_DURATION = 0.35
 PROJECTILE_SPEED = 420
 DOUBLE_JUMP_DECAY = 0.9
+SWORD_BEAM_SPEED = 980
+SWORD_BEAM_DURATION = 0.45
+SWORD_BEAM_LENGTH = 180
+SWORD_BEAM_HEIGHT = 42
+SWORD_BEAM_MAX_RANGE = 1400
+BOUNCE_VELOCITY = -17.0
+BOSS_SHIELD_TIME = 0.8
+MIN_BOUNCY_CHANCE = 0.18
+MOVING_BOUNCY_CHANCE = 0.28
+MAX_DOUBLE_JUMP_STACK = 3
+MAX_SWORD_CHARGES = 4
+MAX_SHIELD_CHARGES = 3
 
 FONT = pygame.font.Font(None, 36)
 TITLE_FONT = pygame.font.Font(None, 96)
@@ -175,12 +193,35 @@ class Particle:
 class Platform:
     rect: pygame.Rect
     colour: pygame.Color = field(default_factory=lambda: pygame.Color(BRICK))
+    is_bouncy: bool = False
+    bounce_velocity: float = PLAYER_JUMP
 
     def draw(self, surface: pygame.Surface, camera_x: float) -> None:
         offset = self.rect.move(-camera_x, 0)
         pygame.draw.rect(surface, self.colour, offset, border_radius=4)
-        grass_top = pygame.Rect(offset.x, offset.y, offset.width, 12)
-        pygame.draw.rect(surface, GRASS, grass_top, border_radius=6)
+        if self.is_bouncy:
+            pad = offset.inflate(-6, -4)
+            pad.height = max(12, pad.height - 6)
+            pad.top = offset.top + 3
+            bounce_surface = pygame.Surface(pad.size, pygame.SRCALPHA)
+            pygame.draw.rect(bounce_surface, BOUNCY_CORAL, bounce_surface.get_rect(), border_radius=8)
+            highlight = bounce_surface.get_rect().inflate(-12, -10)
+            highlight.top = 4
+            pygame.draw.rect(bounce_surface, BOUNCY_TOP, highlight, border_radius=6)
+            stripes = 4
+            stripe_height = max(2, pad.height // (stripes * 2))
+            for i in range(stripes):
+                y = 6 + i * stripe_height * 2
+                pygame.draw.rect(
+                    bounce_surface,
+                    pygame.Color(255, 255, 255, 80),
+                    pygame.Rect(6, y, pad.width - 12, stripe_height),
+                    border_radius=4,
+                )
+            surface.blit(bounce_surface, pad.topleft)
+        else:
+            grass_top = pygame.Rect(offset.x, offset.y, offset.width, 12)
+            pygame.draw.rect(surface, GRASS, grass_top, border_radius=6)
 
 
 @dataclass
@@ -200,25 +241,69 @@ class MovingPlatform(Platform):
         if self.bounds_y == (0, 0):
             self.bounds_y = (self.rect.top, self.rect.top)
 
-    def update(self, dt: float) -> None:
+    def update(self, dt: float, obstacles: Sequence[pygame.Rect] | None = None) -> None:
+        obstacles = obstacles or ()
+        proposed_x = self._float_pos.x
+        proposed_y = self._float_pos.y
         if self.speed_x:
-            self._float_pos.x += self.speed_x * self.direction_x * dt * 60
-            if self._float_pos.x < self.bounds_x[0]:
-                self._float_pos.x = self.bounds_x[0]
+            proposed_x += self.speed_x * self.direction_x * dt * 60
+            if proposed_x < self.bounds_x[0]:
+                proposed_x = self.bounds_x[0]
                 self.direction_x *= -1
-            elif self._float_pos.x + self.rect.width > self.bounds_x[1]:
-                self._float_pos.x = self.bounds_x[1] - self.rect.width
+            elif proposed_x + self.rect.width > self.bounds_x[1]:
+                proposed_x = self.bounds_x[1] - self.rect.width
                 self.direction_x *= -1
         if self.speed_y:
-            self._float_pos.y += self.speed_y * self.direction_y * dt * 60
-            if self._float_pos.y < self.bounds_y[0]:
-                self._float_pos.y = self.bounds_y[0]
+            proposed_y += self.speed_y * self.direction_y * dt * 60
+            if proposed_y < self.bounds_y[0]:
+                proposed_y = self.bounds_y[0]
                 self.direction_y *= -1
-            elif self._float_pos.y + self.rect.height > self.bounds_y[1]:
-                self._float_pos.y = self.bounds_y[1] - self.rect.height
+            elif proposed_y + self.rect.height > self.bounds_y[1]:
+                proposed_y = self.bounds_y[1] - self.rect.height
                 self.direction_y *= -1
-        self.rect.topleft = (int(self._float_pos.x), int(self._float_pos.y))
+        candidate_rect = pygame.Rect(
+            int(round(proposed_x)),
+            int(round(proposed_y)),
+            self.rect.width,
+            self.rect.height,
+        )
+        collision_found = False
+        for obstacle in obstacles:
+            if obstacle is self.rect:
+                continue
+            if candidate_rect.colliderect(obstacle):
+                collision_found = True
+                break
+        if collision_found:
+            if self.speed_x:
+                self.direction_x *= -1
+            if self.speed_y:
+                self.direction_y *= -1
+            self._float_pos = pygame.Vector2(self.rect.topleft)
+            return
+        self._float_pos.xy = (proposed_x, proposed_y)
+        self.rect.topleft = candidate_rect.topleft
 
+
+def clone_platform(source: Platform) -> Platform:
+    base_kwargs = {
+        "rect": source.rect.copy(),
+        "colour": pygame.Color(source.colour),
+        "is_bouncy": source.is_bouncy,
+        "bounce_velocity": source.bounce_velocity,
+    }
+    if isinstance(source, MovingPlatform):
+        clone = MovingPlatform(
+            **base_kwargs,
+            bounds_x=source.bounds_x,
+            bounds_y=source.bounds_y,
+            speed_x=source.speed_x,
+            speed_y=source.speed_y,
+        )
+        clone.direction_x = source.direction_x
+        clone.direction_y = source.direction_y
+        return clone
+    return Platform(**base_kwargs)
 
 @dataclass
 class Enemy:
@@ -226,6 +311,9 @@ class Enemy:
     patrol: Tuple[int, int]
     speed: float = 2.5
     direction: int = 1
+    health: int = 1
+    max_health: int = 1
+    invulnerable: float = 0.0
     stomped: bool = False
     death_timer: float = 0.0
 
@@ -233,11 +321,24 @@ class Enemy:
         if self.stomped:
             self.death_timer -= dt
             return self.death_timer > 0
+        if self.invulnerable > 0:
+            self.invulnerable = max(0.0, self.invulnerable - dt)
         self.rect.x += int(self.speed * self.direction)
         if self.rect.left < self.patrol[0] or self.rect.right > self.patrol[1]:
             self.direction *= -1
             self.rect.x += int(self.speed * self.direction)
         return True
+
+    def take_hit(self) -> str:
+        if self.invulnerable > 0:
+            return "ignored"
+        self.health -= 1
+        if self.health <= 0:
+            self.stomped = True
+            self.death_timer = ENEMY_DEATH_DURATION
+            return "killed"
+        self.invulnerable = 0.3
+        return "damaged"
 
     def draw(self, surface: pygame.Surface, camera_x: float) -> None:
         offset = self.rect.move(-camera_x, 0)
@@ -248,7 +349,11 @@ class Enemy:
                                         offset.width, squashed_height)
             pygame.draw.rect(surface, CRIMSON, squashed_rect, border_radius=8)
             return
-        pygame.draw.rect(surface, CRIMSON, offset, border_radius=8)
+        if self.max_health == 1:
+            body_colour = CRIMSON
+        else:
+            body_colour = pygame.Color(180, 110, 200) if self.health == self.max_health else pygame.Color(210, 150, 240)
+        pygame.draw.rect(surface, body_colour, offset, border_radius=8)
         eye_radius = 4
         eye_offset_y = 8
         eye_offset_x = 10 * self.direction
@@ -258,6 +363,14 @@ class Enemy:
         pygame.draw.circle(surface, WHITE,
                            (offset.centerx + eye_offset_x, offset.centery - eye_offset_y),
                            eye_radius)
+        if self.max_health > 1 and self.health > 0:
+            bar_height = 4
+            bar_rect = pygame.Rect(offset.left + 4, offset.top + 4, offset.width - 8, bar_height)
+            pygame.draw.rect(surface, pygame.Color(40, 10, 60), bar_rect)
+            fill_width = int(bar_rect.width * (self.health / self.max_health))
+            if fill_width > 0:
+                fill_rect = pygame.Rect(bar_rect.left, bar_rect.top, fill_width, bar_rect.height)
+                pygame.draw.rect(surface, pygame.Color(200, 140, 255), fill_rect)
 
 
 @dataclass
@@ -327,10 +440,18 @@ class Player:
     airborne_time: float = 0.0
     sword_ready: bool = False
     sword_cooldown: float = 0.0
+    sword_charges: int = 0
+    shield_charges: int = 0
     _float_pos: pygame.Vector2 = field(init=False)
+    _pending_bounce: Platform | None = field(default=None, init=False)
+    _pending_double_jump_effect: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         self._float_pos = pygame.Vector2(self.rect.topleft)
+
+    def set_position(self, pos: Tuple[int, int]) -> None:
+        self.rect.topleft = (int(pos[0]), int(pos[1]))
+        self._float_pos.xy = (float(self.rect.x), float(self.rect.y))
 
     def jump(self) -> bool:
         if self.can_ground_jump():
@@ -342,11 +463,27 @@ class Player:
         return False
 
     def grant_double_jump(self) -> None:
-        self.double_jump_stock = 1
+        self.double_jump_stock = min(self.double_jump_stock + 1, MAX_DOUBLE_JUMP_STACK)
 
     def grant_sword(self) -> None:
+        self.sword_charges = min(self.sword_charges + 1, MAX_SWORD_CHARGES)
         self.sword_ready = True
         self.sword_cooldown = 0.0
+
+    def add_shield(self) -> None:
+        self.shield_charges = min(self.shield_charges + 1, MAX_SHIELD_CHARGES)
+
+    def consume_shield(self) -> bool:
+        if self.shield_charges <= 0:
+            return False
+        self.shield_charges -= 1
+        return True
+
+    def consume_double_jump_effect(self) -> bool:
+        if not self._pending_double_jump_effect:
+            return False
+        self._pending_double_jump_effect = False
+        return True
 
     def apply_gravity(self, frame_scale: float) -> None:
         self.vel.y += GRAVITY * frame_scale
@@ -367,6 +504,7 @@ class Player:
         self.vel.y = PLAYER_JUMP
         self.on_ground = False
         self.airborne_time = 0.0
+        self._pending_double_jump_effect = False
 
     def can_double_jump(self) -> bool:
         return (not self.on_ground) and self.double_jump_stock > 0
@@ -375,11 +513,13 @@ class Player:
         self.vel.y = PLAYER_JUMP * DOUBLE_JUMP_DECAY
         self.double_jump_stock -= 1
         self.airborne_time = 0.0
+        self._pending_double_jump_effect = True
 
     def update(self, platforms: Sequence[Platform], dt: float) -> List[Particle]:
         particles: List[Particle] = []
         frame_scale = clamp(dt * FPS, 0.0, 2.0)
         previous_bottom = self.rect.bottom
+        previous_top = self.rect.top
         was_on_ground = self.on_ground
         self.animation_time += dt
         self.apply_gravity(frame_scale)
@@ -391,7 +531,7 @@ class Player:
 
         self._float_pos.y += self.vel.y * frame_scale
         self.rect.y = int(round(self._float_pos.y))
-        landed = self._vertical_collisions(platforms, previous_bottom, was_on_ground)
+        landed = self._vertical_collisions(platforms, previous_bottom, previous_top, was_on_ground)
         self._float_pos.y = float(self.rect.y)
 
         if self.on_ground:
@@ -400,35 +540,70 @@ class Player:
             self.airborne_time += dt
         if landed:
             particles.extend(self._spawn_landing_particles())
+        if self._pending_bounce:
+            particles.extend(self.emit_bounce_particles(self._pending_bounce))
+            self._pending_bounce = None
         if self.invincible_timer > 0:
             self.invincible_timer = max(0.0, self.invincible_timer - dt)
         if self.sword_cooldown > 0:
             self.sword_cooldown = max(0.0, self.sword_cooldown - dt)
+        if self.sword_cooldown <= 0:
+            self.sword_ready = self.sword_charges > 0
         return particles
 
     def _horizontal_collisions(self, platforms: Sequence[Platform]) -> None:
         for platform in platforms:
-            if self.rect.colliderect(platform.rect):
-                if self.vel.x > 0:
-                    self.rect.right = platform.rect.left
-                elif self.vel.x < 0:
+            if not self.rect.colliderect(platform.rect):
+                continue
+            overlap = self.rect.clip(platform.rect)
+            if overlap.width == 0 or overlap.width > overlap.height:
+                continue
+            if self.vel.x > 0:
+                self.rect.right = platform.rect.left
+            elif self.vel.x < 0:
+                self.rect.left = platform.rect.right
+            else:
+                if self.rect.centerx >= platform.rect.centerx:
                     self.rect.left = platform.rect.right
-                self._float_pos.x = float(self.rect.x)
-                self.vel.x = 0.0
+                else:
+                    self.rect.right = platform.rect.left
+            self._float_pos.x = float(self.rect.x)
+            self.vel.x = 0.0
 
-    def _vertical_collisions(self, platforms: Sequence[Platform], previous_bottom: int, was_on_ground: bool) -> bool:
+    def _vertical_collisions(
+        self,
+        platforms: Sequence[Platform],
+        previous_bottom: int,
+        previous_top: int,
+        was_on_ground: bool,
+    ) -> bool:
         landed = False
         self.on_ground = False
         for platform in platforms:
             if self.rect.colliderect(platform.rect):
-                if self.vel.y > 0:
+                overlap = self.rect.clip(platform.rect)
+                if overlap.height == 0 or overlap.height > overlap.width:
+                    continue
+                approach_from_above = previous_bottom <= platform.rect.top + 2
+                approach_from_below = previous_top >= platform.rect.bottom - 2
+                if self.vel.y >= 0 and approach_from_above:
                     self.rect.bottom = platform.rect.top
-                    self.vel.y = 0.0
                     self._float_pos.y = float(self.rect.y)
-                    if not was_on_ground:
-                        landed = previous_bottom <= platform.rect.top
+                    if platform.is_bouncy:
+                        self.vel.y = platform.bounce_velocity
+                        self.on_ground = False
+                        self._pending_bounce = platform
+                    else:
+                        self.vel.y = 0.0
+                        self.on_ground = True
+                        if not was_on_ground:
+                            landed = previous_bottom <= platform.rect.top + 2
+                elif self.vel.y > 0 and not approach_from_above:
+                    self.rect.bottom = platform.rect.top
+                    self._float_pos.y = float(self.rect.y)
+                    self.vel.y = 0.0
                     self.on_ground = True
-                elif self.vel.y < 0:
+                elif self.vel.y <= 0 and approach_from_below:
                     self.rect.top = platform.rect.bottom
                     self.vel.y = 0.0
                     self._float_pos.y = float(self.rect.y)
@@ -481,15 +656,38 @@ class Player:
             )
         return gusts
 
-    def perform_sword_attack(self) -> SlashEffect:
-        width = 90
-        height = 60
-        centre = pygame.Vector2(self.rect.centerx + self.facing * 46, self.rect.centery)
-        slash_rect = pygame.Rect(int(centre.x - width // 2), int(centre.y - height // 2), width, height)
+    def emit_bounce_particles(self, platform: Platform) -> List[Particle]:
+        bursts: List[Particle] = []
+        base_colour = BOUNCY_TOP if platform.is_bouncy else CYAN
+        for _ in range(12):
+            angle = random.uniform(math.pi, math.tau)
+            speed = random.uniform(180, 320)
+            vel = pygame.Vector2(math.cos(angle), math.sin(angle)) * speed
+            bursts.append(
+                Particle(
+                    pos=pygame.Vector2(self.rect.centerx, platform.rect.top),
+                    vel=vel,
+                    life=random.uniform(0.25, 0.55),
+                    colour=base_colour,
+                    radius=random.uniform(2.5, 5),
+                )
+            )
+        return bursts
+
+    def perform_sword_attack(self) -> SwordBeam:
+        width = SWORD_BEAM_LENGTH
+        height = SWORD_BEAM_HEIGHT
+        if self.facing > 0:
+            left = self.rect.right - 10
+        else:
+            left = self.rect.left - width + 10
+        top = self.rect.centery - height // 2
+        slash_rect = pygame.Rect(int(left), int(top), width, height)
+        if self.sword_charges > 0:
+            self.sword_charges -= 1
         self.sword_ready = False
-        self.sword_cooldown = 0.4
-        offset = pygame.Vector2(slash_rect.center) - pygame.Vector2(self.rect.center)
-        return SlashEffect(rect=slash_rect, facing=self.facing, offset=offset)
+        self.sword_cooldown = 0.5
+        return SwordBeam(rect=slash_rect, facing=self.facing)
 
     def draw(self, surface: pygame.Surface, camera_x: float) -> None:
         offset = self.rect.move(-camera_x, 0)
@@ -548,18 +746,25 @@ class Player:
         pygame.draw.ellipse(surface, arm_colour, left_arm)
         pygame.draw.ellipse(surface, arm_colour, right_arm)
 
-        if self.double_jump_stock > 0:
-            aura = suit_base.inflate(24, 20)
-            aura_surface = pygame.Surface(aura.size, pygame.SRCALPHA)
-            pygame.draw.ellipse(aura_surface, (120, 220, 255, 110), aura_surface.get_rect(), 4)
-            pulse = (math.sin(self.animation_time * 6.0) + 1) * 0.5
-            pygame.draw.ellipse(
-                aura_surface,
-                (80, 200, 255, int(90 * pulse + 40)),
-                aura_surface.get_rect().inflate(-10, -8),
-                2,
+        if self.shield_charges > 0:
+            shield_radius = max(suit_base.width, suit_base.height) + 14
+            shield_surface = pygame.Surface((shield_radius * 2, shield_radius * 2), pygame.SRCALPHA)
+            shimmer = int(120 + 60 * math.sin(self.animation_time * 8.0))
+            pygame.draw.circle(
+                shield_surface,
+                (150, 230, 255, shimmer),
+                (shield_radius, shield_radius),
+                shield_radius,
+                3,
             )
-            surface.blit(aura_surface, aura.topleft)
+            inner_radius = max(8, shield_radius - 10)
+            pygame.draw.circle(
+                shield_surface,
+                (90, 180, 255, 60),
+                (shield_radius, shield_radius),
+                inner_radius,
+            )
+            surface.blit(shield_surface, shield_surface.get_rect(center=suit_base.center))
 
         if self.sword_ready:
             glow_radius = max(suit_base.width, suit_base.height)
@@ -599,30 +804,261 @@ class Projectile:
 
 
 @dataclass
-class SlashEffect:
+class SwordBeam:
     rect: pygame.Rect
     facing: int
-    timer: float = 0.18
-    offset: pygame.Vector2 = field(default_factory=lambda: pygame.Vector2(0, 0))
+    life: float = SWORD_BEAM_DURATION
+    speed: float = SWORD_BEAM_SPEED
+    travelled: float = 0.0
+    _float_pos: pygame.Vector2 = field(init=False)
+    phase: float = field(default_factory=lambda: random.random() * math.tau)
+
+    def __post_init__(self) -> None:
+        self._float_pos = pygame.Vector2(self.rect.topleft)
+
+    def update(self, dt: float) -> bool:
+        advance = self.speed * dt
+        self.travelled += advance
+        self._float_pos.x += advance * self.facing
+        self.rect.x = int(round(self._float_pos.x))
+        self.life -= dt
+        self.phase = (self.phase + dt * 16.0) % math.tau
+        return self.life > 0 and self.travelled < SWORD_BEAM_MAX_RANGE
+
+    def draw(self, surface: pygame.Surface, camera_x: float) -> None:
+        offset = self.rect.move(-camera_x, 0)
+        if offset.width <= 0 or offset.height <= 0:
+            return
+        glow = pygame.Surface((offset.width + 24, offset.height + 24), pygame.SRCALPHA)
+        core_rect = glow.get_rect()
+        pygame.draw.rect(
+            glow,
+            pygame.Color(80, 255, 210, 180),
+            core_rect,
+            border_radius=16,
+        )
+        pulse = (math.sin(self.phase) + 1) * 0.5
+        band_intensity = int(160 + 60 * pulse)
+        middle_rect = core_rect.inflate(-12, -8)
+        pygame.draw.rect(
+            glow,
+            pygame.Color(PLASMA_BLUE.r, PLASMA_BLUE.g, PLASMA_BLUE.b, band_intensity),
+            middle_rect,
+            border_radius=12,
+        )
+        core = middle_rect.inflate(-max(6, middle_rect.width // 5), -max(6, middle_rect.height // 3))
+        pygame.draw.rect(
+            glow,
+            pygame.Color(PLASMA_CORE.r, PLASMA_CORE.g, PLASMA_CORE.b, 220),
+            core,
+            border_radius=10,
+        )
+        stripe_height = max(2, core.height // 5)
+        for i in range(3):
+            stripe = pygame.Rect(core.left + 4, core.top + 6 + i * stripe_height * 2, core.width - 8, stripe_height)
+            pygame.draw.rect(
+                glow,
+                pygame.Color(255, 255, 255, 140 - i * 30),
+                stripe,
+                border_radius=4,
+            )
+        tip_width = max(12, offset.height // 2)
+        tip_shape = pygame.Surface((tip_width, offset.height + 20), pygame.SRCALPHA)
+        tip_height = tip_shape.get_height()
+        pygame.draw.polygon(
+            tip_shape,
+            pygame.Color(255, 255, 255, 160),
+            [
+                (0, tip_height // 2),
+                (tip_width - 2, 4),
+                (tip_width - 2, tip_height - 4),
+            ],
+        )
+        tip = tip_shape if self.facing > 0 else pygame.transform.flip(tip_shape, True, False)
+        glow.blit(
+            tip,
+            (
+                core.right - tip_width // 2 if self.facing > 0 else core.left - tip_width // 2,
+                (glow.get_height() - tip.get_height()) // 2,
+            ),
+            special_flags=pygame.BLEND_ADD,
+        )
+        jitter = math.sin(self.phase * 2.0) * 3.0
+        glow_rect = glow.get_rect(center=offset.center)
+        glow_rect.x += int(jitter * self.facing)
+        surface.blit(glow, glow_rect)
+
+
+@dataclass
+class JumpSphereEffect:
+    centre: pygame.Vector2
+    width: float
+    height: float
+    timer: float = 0.35
+    lifetime: float = 0.35
 
     def update(self, dt: float) -> bool:
         self.timer -= dt
         return self.timer > 0
 
-    def follow(self, anchor: pygame.Rect) -> None:
-        centre = pygame.Vector2(anchor.center)
-        centre += self.offset
-        self.rect.center = (int(centre.x), int(centre.y))
+    def draw(self, surface: pygame.Surface, camera_x: float) -> None:
+        progress = clamp(self.timer / self.lifetime, 0.0, 1.0)
+        radius_scale = 0.6 + 0.4 * progress
+        alpha = int(180 * progress)
+        size = (int(self.width * radius_scale), int(self.height * radius_scale))
+        ellipse_surface = pygame.Surface(size, pygame.SRCALPHA)
+        pygame.draw.ellipse(
+            ellipse_surface,
+            pygame.Color(140, 230, 255, alpha),
+            ellipse_surface.get_rect(),
+            4,
+        )
+        fill = ellipse_surface.get_rect().inflate(-int(size[0] * 0.25), -int(size[1] * 0.35))
+        pygame.draw.ellipse(
+            ellipse_surface,
+            pygame.Color(200, 255, 255, int(alpha * 0.4)),
+            fill,
+        )
+        draw_pos = (int(self.centre.x - camera_x - size[0] / 2), int(self.centre.y - size[1] / 2))
+        surface.blit(ellipse_surface, draw_pos)
+
+@dataclass
+class Boss:
+    rect: pygame.Rect
+    anchors: List[pygame.Vector2]
+    health: int = 5
+    speed: float = 180.0
+    attack_cooldown: float = 2.4
+    invulnerable: float = 0.0
+    defeated: bool = False
+    celebration_timer: float = 1.2
+    anchor_index: int = 0
+    move_timer: float = 0.0
+    pulse: float = field(default_factory=lambda: random.random() * math.tau)
+
+    def clone(self) -> "Boss":
+        return Boss(
+            self.rect.copy(),
+            [pygame.Vector2(anchor) for anchor in self.anchors],
+            health=self.health,
+            speed=self.speed,
+            attack_cooldown=self.attack_cooldown,
+            invulnerable=0.0,
+            defeated=self.defeated,
+            celebration_timer=self.celebration_timer,
+            anchor_index=self.anchor_index,
+            move_timer=0.0,
+            pulse=random.random() * math.tau,
+        )
+
+    def update(self, dt: float, player_rect: pygame.Rect) -> tuple[bool, List[Projectile]]:
+        projectiles: List[Projectile] = []
+        self.pulse = (self.pulse + dt * 5.2) % math.tau
+        if self.defeated:
+            self.celebration_timer = max(0.0, self.celebration_timer - dt)
+            return self.celebration_timer > 0, projectiles
+
+        if self.anchors:
+            target = self.anchors[self.anchor_index]
+            current = pygame.Vector2(self.rect.center)
+            delta = target - current
+            if delta.length_squared() > 9:
+                direction = delta.normalize()
+                step = direction * self.speed * dt
+                if step.length() > delta.length():
+                    step = delta
+                self.rect.centerx += int(round(step.x))
+                self.rect.centery += int(round(step.y))
+            else:
+                self.move_timer += dt
+                if self.move_timer >= 0.55:
+                    self.anchor_index = (self.anchor_index + 1) % len(self.anchors)
+                    self.move_timer = 0.0
+
+        self.attack_cooldown -= dt
+        if self.attack_cooldown <= 0:
+            self.attack_cooldown = 2.9
+            projectiles.extend(self._spawn_waves(player_rect))
+
+        if self.invulnerable > 0:
+            self.invulnerable = max(0.0, self.invulnerable - dt)
+
+        return True, projectiles
+
+    def _spawn_waves(self, player_rect: pygame.Rect) -> List[Projectile]:
+        projectiles: List[Projectile] = []
+        origin = pygame.Vector2(self.rect.centerx, self.rect.bottom - 12)
+        for offset in (-2, -1, 0, 1, 2):
+            vel = pygame.Vector2(offset * 90, 240 + abs(offset) * 30)
+            colour = pygame.Color(VOID_PURPLE)
+            projectiles.append(Projectile(pos=origin.copy(), vel=vel, radius=9, colour=colour, life=3.4))
+        sky_origin = pygame.Vector2(self.rect.centerx, self.rect.top + 6)
+        to_player = pygame.Vector2(player_rect.centerx - self.rect.centerx, player_rect.centery - self.rect.centery)
+        if to_player.length_squared() > 1:
+            to_player = to_player.normalize()
+        else:
+            to_player = pygame.Vector2(0, 1)
+        to_player.y = max(to_player.y, 0.3)
+        projectile_speed = 340
+        targeted_colour = pygame.Color(200, 160, 255)
+        projectiles.append(
+            Projectile(
+                pos=sky_origin,
+                vel=to_player * projectile_speed,
+                radius=10,
+                colour=targeted_colour,
+                life=3.6,
+            )
+        )
+        return projectiles
+
+    def take_hit(self) -> bool:
+        if self.invulnerable > 0 or self.defeated:
+            return False
+        self.health -= 1
+        self.invulnerable = BOSS_SHIELD_TIME
+        if self.health <= 0:
+            self.defeated = True
+            self.celebration_timer = 1.2
+        return True
 
     def draw(self, surface: pygame.Surface, camera_x: float) -> None:
+        if self.celebration_timer <= 0 and self.defeated:
+            return
         offset = self.rect.move(-camera_x, 0)
-        progress = clamp(self.timer / 0.18, 0, 1)
-        alpha = int(220 * progress)
-        colour = pygame.Color(NEON_GREEN.r, NEON_GREEN.g, NEON_GREEN.b, alpha)
-        sweep = pygame.Surface(offset.size, pygame.SRCALPHA)
-        pygame.draw.ellipse(sweep, colour, sweep.get_rect(), 2)
-        surface.blit(sweep, offset)
+        body = pygame.Surface((offset.width + 20, offset.height + 20), pygame.SRCALPHA)
+        body_rect = body.get_rect()
+        base_colour = pygame.Color(150, 110, 255, 220)
+        pygame.draw.ellipse(body, base_colour, body_rect.inflate(-6, -6))
+        inner_rect = body_rect.inflate(-22, -18)
+        glow_alpha = int(140 + 60 * math.sin(self.pulse))
+        pygame.draw.ellipse(body, pygame.Color(90, 40, 200, glow_alpha), inner_rect)
+        eye_offset = int(10 + 4 * math.sin(self.pulse * 2))
+        pygame.draw.circle(body, pygame.Color(255, 255, 255, 220), (body_rect.centerx, body_rect.centery - 6), 10)
+        pygame.draw.circle(body, pygame.Color(40, 10, 80), (body_rect.centerx + eye_offset, body_rect.centery - 6), 6)
+        mouth = pygame.Rect(0, 0, body_rect.width // 2, 10)
+        mouth.center = (body_rect.centerx, body_rect.centery + 18)
+        pygame.draw.ellipse(body, pygame.Color(30, 0, 60), mouth)
 
+        if self.invulnerable > 0 and not self.defeated:
+            shield_rect = body_rect.inflate(16, 14)
+            shield_alpha = int(80 + 80 * math.sin(self.invulnerable * 22))
+            pygame.draw.ellipse(body, pygame.Color(120, 220, 255, shield_alpha), shield_rect, 4)
+        elif self.defeated:
+            fade = clamp(self.celebration_timer / 1.2, 0.0, 1.0)
+            body.fill((255, 255, 255, int(180 * fade)), special_flags=pygame.BLEND_RGBA_MULT)
+
+        surface.blit(body, body_rect.move(offset.left - 10, offset.top - 10))
+
+        # Draw health pips
+        pip_width = 16
+        pip_spacing = 6
+        total_width = self.health * pip_width + (self.health - 1) * pip_spacing if self.health > 0 else 0
+        start_x = offset.centerx - total_width // 2
+        pip_y = offset.top - 24
+        for i in range(max(self.health, 0)):
+            pip_rect = pygame.Rect(start_x + i * (pip_width + pip_spacing), pip_y, pip_width, 8)
+            pygame.draw.rect(surface, pygame.Color(255, 210, 120), pip_rect, border_radius=4)
 
 @dataclass
 class Coin:
@@ -718,6 +1154,31 @@ class SwordPowerUp:
 
 
 @dataclass
+class ShieldPowerUp:
+    rect: pygame.Rect
+    pulse: float = field(default_factory=lambda: random.random() * math.tau)
+    collected: bool = False
+
+    def update(self, dt: float) -> None:
+        self.pulse = (self.pulse + dt * 4.2) % math.tau
+
+    def draw(self, surface: pygame.Surface, camera_x: float) -> None:
+        if self.collected:
+            return
+        offset = self.rect.move(-camera_x, 0)
+        halo = pygame.Surface((offset.width + 24, offset.height + 24), pygame.SRCALPHA)
+        halo_radius = halo.get_width() // 2
+        alpha = int(130 + 70 * math.sin(self.pulse))
+        pygame.draw.circle(halo, (120, 220, 255, alpha), (halo_radius, halo_radius), halo_radius)
+        surface.blit(halo, halo.get_rect(center=offset.center))
+        gem = pygame.Surface(offset.size, pygame.SRCALPHA)
+        pygame.draw.ellipse(gem, pygame.Color(180, 240, 255, 220), gem.get_rect())
+        crest = gem.get_rect().inflate(-10, -14)
+        pygame.draw.ellipse(gem, pygame.Color(60, 110, 200, 210), crest, 4)
+        pygame.draw.ellipse(gem, pygame.Color(255, 255, 255, 160), crest.inflate(-8, -10))
+        surface.blit(gem, offset)
+
+@dataclass
 class GoalFlag:
     rect: pygame.Rect
     flutter: float = 0.0
@@ -743,6 +1204,17 @@ def generate_level(stage: int, rng: random.Random, theme_index: int) -> dict:
     min_y = 260
     max_y = 520
     platform_height = 40
+    base_bounce_chance = MIN_BOUNCY_CHANCE + 0.03 * stage
+    bounce_multiplier = 1.0 + 0.05 * stage
+
+    def mark_bouncy(platform: Platform, strength: float = 1.0) -> None:
+        platform.is_bouncy = True
+        platform.bounce_velocity = BOUNCE_VELOCITY * strength
+        platform.colour = pygame.Color(BOUNCY_CORAL)
+
+    def maybe_make_bouncy(platform: Platform, chance: float, strength: float = 1.0) -> None:
+        if not platform.is_bouncy and rng.random() < chance:
+            mark_bouncy(platform, strength)
 
     platforms: List[Platform] = []
     first_width = rng.randint(220, 280)
@@ -758,7 +1230,9 @@ def generate_level(stage: int, rng: random.Random, theme_index: int) -> dict:
         delta_y = rng.randint(-80 - stage * 10, 80 + stage * 10)
         current_y = int(clamp(current_y + delta_y, min_y, max_y))
         rect = pygame.Rect(current_right + gap, current_y, width, platform_height)
-        platforms.append(Platform(rect))
+        new_platform = Platform(rect)
+        maybe_make_bouncy(new_platform, base_bounce_chance, bounce_multiplier)
+        platforms.append(new_platform)
         current_right = rect.right
 
     final_gap = rng.randint(80, 140)
@@ -783,7 +1257,21 @@ def generate_level(stage: int, rng: random.Random, theme_index: int) -> dict:
             y = int(clamp(target_top, min_y - 160, platform.rect.y - 90))
             if platform.rect.y - y < 80:
                 continue
-            floating_platforms.append(Platform(pygame.Rect(x, y, float_width, 28)))
+            candidate_rect = pygame.Rect(x, y, float_width, 28)
+            too_close = False
+            for existing in platforms:
+                overlap = min(candidate_rect.right, existing.rect.right) - max(candidate_rect.left, existing.rect.left)
+                if overlap <= 0:
+                    continue
+                vertical_gap = existing.rect.top - candidate_rect.bottom
+                if 0 <= vertical_gap < 100 and overlap > float_width * 0.6:
+                    too_close = True
+                    break
+            if too_close:
+                continue
+            float_platform = Platform(candidate_rect)
+            maybe_make_bouncy(float_platform, base_bounce_chance + 0.08, bounce_multiplier + 0.05)
+            floating_platforms.append(float_platform)
     platforms.extend(floating_platforms)
 
     def create_horizontal_platform() -> MovingPlatform | None:
@@ -812,6 +1300,13 @@ def generate_level(stage: int, rng: random.Random, theme_index: int) -> dict:
             speed_y=0.0,
         )
         mp.colour = pygame.Color(160, 110, 90)
+        for other in platforms:
+            if mp.rect.colliderect(other.rect.inflate(-12, -12)):
+                return None
+        for other in moving_platforms:
+            if mp.rect.colliderect(other.rect.inflate(-12, -12)):
+                return None
+        maybe_make_bouncy(mp, MOVING_BOUNCY_CHANCE, bounce_multiplier + 0.04)
         return mp
 
     def create_vertical_platform() -> MovingPlatform | None:
@@ -839,6 +1334,13 @@ def generate_level(stage: int, rng: random.Random, theme_index: int) -> dict:
             speed_y=speed,
         )
         mp.colour = pygame.Color(150, 105, 120)
+        for other in platforms:
+            if mp.rect.colliderect(other.rect.inflate(-12, -12)):
+                return None
+        for other in moving_platforms:
+            if mp.rect.colliderect(other.rect.inflate(-12, -12)):
+                return None
+        maybe_make_bouncy(mp, MOVING_BOUNCY_CHANCE, bounce_multiplier + 0.06)
         return mp
 
     moving_platforms: List[MovingPlatform] = []
@@ -870,18 +1372,36 @@ def generate_level(stage: int, rng: random.Random, theme_index: int) -> dict:
 
     platforms_with_motion: List[Platform | MovingPlatform] = platforms + moving_platforms
 
+    def has_low_headroom(surface: Platform | MovingPlatform, min_gap: int = 120) -> bool:
+        surface_rect = surface.rect
+        for other in platforms_with_motion:
+            if other is surface:
+                continue
+            other_rect = other.rect
+            if other_rect.top >= surface_rect.top:
+                continue
+            horizontal_overlap = min(surface_rect.right, other_rect.right) - max(surface_rect.left, other_rect.left)
+            if horizontal_overlap <= 0:
+                continue
+            vertical_gap = surface_rect.top - other_rect.bottom
+            if 0 <= vertical_gap < min_gap and horizontal_overlap > surface_rect.width * 0.4:
+                return True
+        return False
+
     enemies: List[Enemy] = []
     for platform in platforms[1:-1]:
         patrol_left = platform.rect.left + 12
         patrol_right = platform.rect.right - 12
         if patrol_right - patrol_left < 50:
             continue
-        if rng.random() < 0.35 + 0.12 * stage:
+        if rng.random() < 0.35 + 0.12 * stage and not has_low_headroom(platform, min_gap=110):
             size = 38 if stage == 0 else 42
             x = rng.randint(patrol_left, patrol_right - size)
             rect = pygame.Rect(x, platform.rect.y - size, size, size)
             speed = 1.3 + rng.random() * (0.6 + 0.4 * stage)
-            enemies.append(Enemy(rect, (patrol_left, patrol_right), speed=speed))
+            tough = stage >= 1 and rng.random() < 0.35
+            hp = 2 if tough else 1
+            enemies.append(Enemy(rect, (patrol_left, patrol_right), speed=speed, health=hp, max_health=hp))
 
     solid_rects = [p.rect for p in platforms_with_motion]
 
@@ -931,6 +1451,8 @@ def generate_level(stage: int, rng: random.Random, theme_index: int) -> dict:
     desired_coins = min(len(surfaces), rng.randint(5, 6))
     coins: List[Coin] = []
     for surface in surfaces[:desired_coins]:
+        if has_low_headroom(surface, min_gap=110):
+            continue
         coins.append(Coin(coin_rect_for(surface.rect)))
 
     shooters: List[ShooterEnemy] = []
@@ -963,11 +1485,30 @@ def generate_level(stage: int, rng: random.Random, theme_index: int) -> dict:
         aura.bottom = platform.rect.top - 8
         if not area_is_clear(aura, platform.rect):
             continue
+        if has_low_headroom(platform, min_gap=130):
+            continue
         double_jump_orbs.append(DoubleJumpPowerUp(pu_rect))
         break
     if not double_jump_orbs:
         anchor = platforms[len(platforms) // 2]
-        double_jump_orbs.append(DoubleJumpPowerUp(pygame.Rect(anchor.rect.centerx - 18, anchor.rect.top - 60, 36, 36)))
+        if not has_low_headroom(anchor, min_gap=130):
+            double_jump_orbs.append(DoubleJumpPowerUp(pygame.Rect(anchor.rect.centerx - 18, anchor.rect.top - 60, 36, 36)))
+
+    shield_tokens: List[ShieldPowerUp] = []
+    shield_candidates = [p for p in platforms_with_motion if has_coin_clearance(p.rect)]
+    rng.shuffle(shield_candidates)
+    for platform in shield_candidates:
+        shield_rect = pygame.Rect(platform.rect.centerx - 20, platform.rect.top - 62, 40, 40)
+        aura = shield_rect.inflate(12, 12)
+        aura.bottom = platform.rect.top - 6
+        if not area_is_clear(aura, platform.rect):
+            continue
+        if any(shield_rect.colliderect(orb.rect) for orb in double_jump_orbs):
+            continue
+        if has_low_headroom(platform, min_gap=120):
+            continue
+        shield_tokens.append(ShieldPowerUp(shield_rect))
+        break
 
     sword_tokens: List[SwordPowerUp] = []
     sword_candidates = [p for p in platforms_with_motion if has_coin_clearance(p.rect) and is_surface_reachable(p)]
@@ -977,6 +1518,8 @@ def generate_level(stage: int, rng: random.Random, theme_index: int) -> dict:
         aura = sword_rect.inflate(8, 8)
         aura.bottom = platform.rect.top - 6
         if not area_is_clear(aura, platform.rect):
+            continue
+        if has_low_headroom(platform, min_gap=120):
             continue
         sword_tokens.append(SwordPowerUp(sword_rect))
         break
@@ -996,20 +1539,150 @@ def generate_level(stage: int, rng: random.Random, theme_index: int) -> dict:
         "shooters": shooters,
         "double_jump": double_jump_orbs,
         "swords": sword_tokens,
+        "shields": shield_tokens,
         "coins": coins,
         "goal": goal,
         "spawn_point": spawn_point,
         "kill_plane": kill_plane,
         "length": level_length,
         "theme": theme_index,
+        "is_boss": False,
+        "boss": None,
     }
 
+
+def generate_boss_level(stage: int, rng: random.Random, theme_index: int) -> dict:
+    level_length = 1280
+    base_y = 520
+    platform_height = 44
+
+    def make_platform(rect: pygame.Rect, *, bouncy: bool = False, strength: float = 1.0) -> Platform:
+        platform = Platform(rect)
+        if bouncy:
+            platform.is_bouncy = True
+            platform.bounce_velocity = BOUNCE_VELOCITY * strength
+            platform.colour = pygame.Color(BOUNCY_CORAL)
+        return platform
+
+    platforms: List[Platform] = [
+        make_platform(pygame.Rect(0, base_y, 320, platform_height)),
+        make_platform(pygame.Rect(360, base_y, 320, platform_height)),
+        make_platform(pygame.Rect(720, base_y, 320, platform_height)),
+    ]
+
+    bounce_strength = 1.12
+    bounce_pad_left = make_platform(pygame.Rect(90, base_y - 70, 120, 30), bouncy=True, strength=bounce_strength)
+    bounce_pad_right = make_platform(pygame.Rect(820, base_y - 70, 120, 30), bouncy=True, strength=bounce_strength + 0.05)
+    elevated = make_platform(pygame.Rect(480, base_y - 150, 160, 28))
+
+    platforms.extend([bounce_pad_left, bounce_pad_right, elevated])
+
+    moving_platforms: List[MovingPlatform] = []
+
+    vertical_platform = MovingPlatform(
+        pygame.Rect(560, base_y - 220, 130, 26),
+        bounds_x=(560, 560 + 130),
+        bounds_y=(base_y - 300, base_y - 80),
+        speed_x=0.0,
+        speed_y=2.3,
+        is_bouncy=True,
+        bounce_velocity=BOUNCE_VELOCITY * 1.1,
+    )
+    vertical_platform.colour = pygame.Color(200, 150, 255)
+    moving_platforms.append(vertical_platform)
+
+    horizontal_platform = MovingPlatform(
+        pygame.Rect(280, base_y - 210, 140, 26),
+        bounds_x=(160, level_length - 260),
+        bounds_y=(base_y - 210, base_y - 180),
+        speed_x=2.6,
+        speed_y=0.0,
+        is_bouncy=False,
+    )
+    horizontal_platform.colour = pygame.Color(180, 120, 200)
+    moving_platforms.append(horizontal_platform)
+
+    aerial_pad = MovingPlatform(
+        pygame.Rect(900, base_y - 260, 120, 24),
+        bounds_x=(780, level_length - 180),
+        bounds_y=(base_y - 320, base_y - 240),
+        speed_x=2.1,
+        speed_y=0.0,
+        is_bouncy=True,
+        bounce_velocity=BOUNCE_VELOCITY * 1.05,
+    )
+    aerial_pad.colour = pygame.Color(230, 170, 220)
+    moving_platforms.append(aerial_pad)
+
+    spawn_point = (platforms[0].rect.left + 48, platforms[0].rect.top - 60)
+
+    double_jump_orbs = [
+        DoubleJumpPowerUp(pygame.Rect(360, base_y - 220, 36, 36)),
+        DoubleJumpPowerUp(pygame.Rect(980, base_y - 320, 36, 36)),
+    ]
+
+    sword_tokens = [
+        SwordPowerUp(pygame.Rect(640, base_y - 260, 32, 32)),
+        SwordPowerUp(pygame.Rect(220, base_y - 200, 32, 32)),
+    ]
+
+    shield_tokens = [
+        ShieldPowerUp(pygame.Rect(500, base_y - 220, 38, 38)),
+        ShieldPowerUp(pygame.Rect(1030, base_y - 280, 38, 38)),
+    ]
+
+    coins: List[Coin] = []
+    for anchor in (bounce_pad_left, bounce_pad_right, elevated):
+        coin_rect = pygame.Rect(anchor.rect.centerx - 14, anchor.rect.top - 50, 28, 28)
+        coins.append(Coin(coin_rect))
+
+    goal = GoalFlag(pygame.Rect(level_length - 120, base_y, 32, 80))
+    kill_plane = SCREEN_HEIGHT + 220
+
+    anchors = [
+        pygame.Vector2(600, base_y - 260),
+        pygame.Vector2(860, base_y - 280),
+        pygame.Vector2(380, base_y - 250),
+        pygame.Vector2(620, base_y - 340),
+    ]
+
+    boss_rect = pygame.Rect(0, 0, 96, 96)
+    boss_rect.center = (620, base_y - 280)
+    boss = Boss(boss_rect, anchors, health=6, speed=200.0, attack_cooldown=2.2)
+
+    return {
+        "platforms": platforms,
+        "moving_platforms": moving_platforms,
+        "enemies": [],
+        "shooters": [],
+        "double_jump": double_jump_orbs,
+        "swords": sword_tokens,
+        "shields": shield_tokens,
+        "coins": coins,
+        "goal": goal,
+        "spawn_point": spawn_point,
+        "kill_plane": kill_plane,
+        "length": level_length,
+        "theme": theme_index,
+        "is_boss": True,
+        "boss": boss,
+    }
 
 def generate_level_pack(count: int, seed: int | None = None) -> List[dict]:
     rng = random.Random(seed)
     themes = [i % len(BACKGROUND_THEMES) for i in range(count)]
     rng.shuffle(themes)
-    return [generate_level(stage, rng, themes[stage]) for stage in range(count)]
+    if count <= 0:
+        return []
+    boss_index = rng.randrange(1, count) if count > 1 else 0
+    pack: List[dict] = []
+    for stage in range(count):
+        theme_index = themes[stage]
+        if stage == boss_index:
+            pack.append(generate_boss_level(stage, rng, theme_index))
+        else:
+            pack.append(generate_level(stage, rng, theme_index))
+    return pack
 
 
 # ---------------------------------------------------------------------------
@@ -1109,6 +1782,7 @@ class LevelManager:
         self.shooters: List[ShooterEnemy] = []
         self.double_jump_orbs: List[DoubleJumpPowerUp] = []
         self.sword_tokens: List[SwordPowerUp] = []
+        self.shield_tokens: List[ShieldPowerUp] = []
         self.coins: List[Coin] = []
         self.goal = GoalFlag(pygame.Rect(0, 0, 32, 80))
         self.spawn_point: Tuple[int, int] = (80, 420)
@@ -1116,6 +1790,14 @@ class LevelManager:
         self.level_length = SCREEN_WIDTH
         self.total_levels = stage_count
         self.theme_index = 0
+        self.boss: Boss | None = None
+        self.boss_victory_timer: float = 0.0
+        self._boss_transition_pending: bool = False
+        self.boss_level_index: int = 0
+        self._is_boss_level: bool = False
+        self.sword_spawn_points: List[pygame.Rect] = []
+        self.sword_spawn_timer: float = 0.0
+        self.sword_spawn_index: int = 0
         self.generate_new_levels()
 
     def generate_new_levels(self, seed: int | None = None) -> None:
@@ -1123,26 +1805,27 @@ class LevelManager:
         self.level_blueprints = generate_level_pack(self.stage_count, seed_value)
         self.total_levels = len(self.level_blueprints)
         self.level_index = 0
+        self.boss_level_index = next(
+            (i for i, blueprint in enumerate(self.level_blueprints) if blueprint.get("is_boss")), -1
+        )
         self.reset_level()
 
     def reset_level(self) -> None:
         data = self.level_blueprints[self.level_index]
-        self.platforms = [Platform(p.rect.copy(), pygame.Color(p.colour)) for p in data["platforms"]]
-        self.moving_platforms = []
-        for mp in data["moving_platforms"]:
-            clone = MovingPlatform(
-                mp.rect.copy(),
-                pygame.Color(mp.colour),
-                bounds_x=mp.bounds_x,
-                bounds_y=mp.bounds_y,
-                speed_x=mp.speed_x,
-                speed_y=mp.speed_y,
-            )
-            clone.direction_x = mp.direction_x
-            clone.direction_y = mp.direction_y
-            self.moving_platforms.append(clone)
+        self.platforms = [clone_platform(p) for p in data["platforms"]]
+        self.moving_platforms = [clone_platform(mp) for mp in data["moving_platforms"]]
         self.enemies = [
-            Enemy(e.rect.copy(), e.patrol, e.speed, e.direction, e.stomped, e.death_timer)
+            Enemy(
+                e.rect.copy(),
+                e.patrol,
+                e.speed,
+                e.direction,
+                e.health,
+                e.max_health,
+                e.invulnerable,
+                e.stomped,
+                e.death_timer,
+            )
             for e in data["enemies"]
         ]
         self.shooters = [
@@ -1154,11 +1837,8 @@ class LevelManager:
             clone = DoubleJumpPowerUp(orb.rect.copy())
             clone.pulse = orb.pulse
             self.double_jump_orbs.append(clone)
+        raw_swords = data.get("swords", [])
         self.sword_tokens = []
-        for sword in data["swords"]:
-            clone = SwordPowerUp(sword.rect.copy())
-            clone.pulse = sword.pulse
-            self.sword_tokens.append(clone)
         self.coins = []
         for c in data["coins"]:
             coin = Coin(c.rect.copy())
@@ -1170,19 +1850,56 @@ class LevelManager:
         self.kill_plane = data["kill_plane"]
         self.level_length = data["length"]
         self.theme_index = data.get("theme", 0)
+        self.shield_tokens = []
+        for shield in data.get("shields", []):
+            clone = ShieldPowerUp(shield.rect.copy())
+            clone.pulse = shield.pulse
+            self.shield_tokens.append(clone)
+        self._is_boss_level = data.get("is_boss", False)
+        self.sword_spawn_points = []
+        self.sword_spawn_index = 0
+        self.sword_spawn_timer = 0.0
+        if self._is_boss_level:
+            self.sword_spawn_points = [s.rect.copy() for s in raw_swords]
+            self.sword_tokens = []
+            if self.sword_spawn_points:
+                self._spawn_boss_sword(initial=True)
+        else:
+            for sword in raw_swords:
+                clone = SwordPowerUp(sword.rect.copy())
+                clone.pulse = sword.pulse
+                self.sword_tokens.append(clone)
+        boss_template = data.get("boss")
+        self.boss = boss_template.clone() if boss_template else None
+        self.boss_victory_timer = 0.0
+        self._boss_transition_pending = False
+
+    def _spawn_boss_sword(self, *, initial: bool = False) -> None:
+        if not self.sword_spawn_points:
+            return
+        slot = self.sword_spawn_points[self.sword_spawn_index % len(self.sword_spawn_points)]
+        sword = SwordPowerUp(slot.copy())
+        sword.pulse = random.random() * math.tau
+        self.sword_tokens.append(sword)
+        self.sword_spawn_index = (self.sword_spawn_index + 1) % max(1, len(self.sword_spawn_points))
+        self.sword_spawn_timer = 3.0 if not initial else 2.0
 
     @property
     def all_platforms(self) -> List[Platform]:
         return self.platforms + self.moving_platforms
 
     @property
-    def powerups(self) -> List[DoubleJumpPowerUp | SwordPowerUp]:
-        return [*self.double_jump_orbs, *self.sword_tokens]
+    def powerups(self) -> List[DoubleJumpPowerUp | SwordPowerUp | ShieldPowerUp]:
+        return [*self.double_jump_orbs, *self.sword_tokens, *self.shield_tokens]
 
     def update(self, dt: float, player_rect: pygame.Rect) -> List[Projectile]:
-        for platform in self.moving_platforms:
-            platform.update(dt)
         spawned: List[Projectile] = []
+        static_rects = [platform.rect for platform in self.platforms]
+        moving_rects = [mp.rect for mp in self.moving_platforms]
+        for index, platform in enumerate(self.moving_platforms):
+            obstacles = static_rects + [moving_rects[i] for i in range(len(self.moving_platforms)) if i != index]
+            platform.update(dt, obstacles)
+            moving_rects[index] = platform.rect
         self.enemies = [enemy for enemy in self.enemies if enemy.update(dt)]
         updated_shooters: List[ShooterEnemy] = []
         for shooter in self.shooters:
@@ -1193,9 +1910,31 @@ class LevelManager:
         self.shooters = updated_shooters
         for orb in self.double_jump_orbs:
             orb.update(dt)
-        for sword in self.sword_tokens:
+        for sword in list(self.sword_tokens):
             sword.update(dt)
-        self.goal.update(dt)
+        if self._is_boss_level:
+            collected_any = False
+            for sword in list(self.sword_tokens):
+                if sword.collected:
+                    self.sword_tokens.remove(sword)
+                    collected_any = True
+            if collected_any:
+                self.sword_spawn_timer = max(self.sword_spawn_timer, 2.2)
+            if not self.sword_tokens and self.sword_spawn_points:
+                if self.sword_spawn_timer > 0:
+                    self.sword_spawn_timer = max(0.0, self.sword_spawn_timer - dt)
+                else:
+                    self._spawn_boss_sword()
+        for shield in self.shield_tokens:
+            if not shield.collected:
+                shield.update(dt)
+        if self.boss:
+            _, boss_projectiles = self.boss.update(dt, player_rect)
+            spawned.extend(boss_projectiles)
+        if self.goal:
+            self.goal.update(dt)
+        if self.boss and self.boss.defeated and self._boss_transition_pending and self.boss_victory_timer > 0:
+            self.boss_victory_timer = max(0.0, self.boss_victory_timer - dt)
         return spawned
 
     def remaining_coins(self) -> int:
@@ -1205,6 +1944,20 @@ class LevelManager:
         if self.level_index + 1 < self.total_levels:
             self.level_index += 1
             self.reset_level()
+            return True
+        return False
+
+    def is_boss_stage(self) -> bool:
+        return self._is_boss_level
+
+    def on_boss_hit(self) -> None:
+        if self.boss and self.boss.defeated:
+            self._boss_transition_pending = True
+            self.boss_victory_timer = max(self.boss_victory_timer, 1.4)
+
+    def consume_boss_transition(self) -> bool:
+        if self._boss_transition_pending and self.boss_victory_timer == 0.0:
+            self._boss_transition_pending = False
             return True
         return False
 
@@ -1226,7 +1979,8 @@ class MarioLikeGame:
         self.player = Player(pygame.Rect(spawn_x, spawn_y, 44, 60))
         self.particles: List[Particle] = []
         self.projectiles: List[Projectile] = []
-        self.slashes: List[SlashEffect] = []
+        self.slashes: List[SwordBeam] = []
+        self.jump_spheres: List[JumpSphereEffect] = []
         self.score = 0
         self.combo_timer = 0.0
         self.time_elapsed = 0.0
@@ -1234,6 +1988,9 @@ class MarioLikeGame:
         self.lives = self.max_lives
         self.jump_was_pressed = False
         self.attack_was_pressed = False
+        self.nova_was_pressed = False
+        self.combo_nova_ready = False
+        self.combo_nova_cooldown = 0.0
         self.sky.set_theme(self.levels.theme_index)
 
     # ---------------------------- State transitions ---------------------
@@ -1245,6 +2002,7 @@ class MarioLikeGame:
         self.particles.clear()
         self.projectiles.clear()
         self.slashes.clear()
+        self.jump_spheres.clear()
         self.score = 0
         self.combo_timer = 0.0
         self.time_elapsed = 0.0
@@ -1252,6 +2010,9 @@ class MarioLikeGame:
         self.camera.x = 0
         self.jump_was_pressed = False
         self.attack_was_pressed = False
+        self.nova_was_pressed = False
+        self.combo_nova_ready = False
+        self.combo_nova_cooldown = 0.0
         self.sky.set_theme(self.levels.theme_index)
 
     def pause(self) -> None:
@@ -1279,12 +2040,14 @@ class MarioLikeGame:
         self.player.invincible_timer = 1.2
         self.levels.reset_level()
         spawn_x, spawn_y = self.levels.spawn_point
-        self.player.rect.topleft = (spawn_x, spawn_y)
+        self.player.set_position((spawn_x, spawn_y))
         self.player.vel.xy = (0, 0)
         self.player.on_ground = False
         self.player.double_jump_stock = 0
         self.player.sword_ready = False
         self.player.sword_cooldown = 0.0
+        self.player.sword_charges = 0
+        self.player.shield_charges = 0
         self.time_elapsed = 0.0
         self.camera.x = 0
         self.projectiles.clear()
@@ -1293,6 +2056,10 @@ class MarioLikeGame:
         self.particles.extend(self._sparkle_effect(self.player.rect.midbottom))
         self.jump_was_pressed = False
         self.attack_was_pressed = False
+        self.jump_spheres.clear()
+        self.combo_nova_ready = False
+        self.combo_nova_cooldown = 0.0
+        self.nova_was_pressed = False
         self.sky.set_theme(self.levels.theme_index)
 
     # ------------------------------ Update ------------------------------
@@ -1300,6 +2067,17 @@ class MarioLikeGame:
         keys = pygame.key.get_pressed()
         if self.state == GameState.PLAYING:
             self.time_elapsed += dt
+            if self.combo_nova_cooldown > 0:
+                self.combo_nova_cooldown = max(0.0, self.combo_nova_cooldown - dt)
+            nova_pressed = keys[pygame.K_e]
+            if (
+                nova_pressed
+                and not self.nova_was_pressed
+                and self.combo_nova_ready
+                and self.combo_nova_cooldown <= 0
+            ):
+                self._trigger_combo_nova()
+            self.nova_was_pressed = nova_pressed
             direction = 0
             if keys[pygame.K_LEFT] or keys[pygame.K_a]:
                 direction -= 1
@@ -1311,22 +2089,26 @@ class MarioLikeGame:
             if jump_pressed and not self.jump_was_pressed and self.player.jump():
                 self.particles.extend(self.player.emit_jump_particles())
                 self.particles.extend(self.player.emit_wind_gust())
+                if self.player.consume_double_jump_effect():
+                    centre = pygame.Vector2(self.player.rect.centerx, self.player.rect.bottom + 12)
+                    self.jump_spheres.append(
+                        JumpSphereEffect(
+                            centre=centre,
+                            width=self.player.rect.width + 36,
+                            height=28,
+                        )
+                    )
             self.jump_was_pressed = jump_pressed
 
-            attack_pressed = (
-                keys[pygame.K_f]
-                or keys[pygame.K_LCTRL]
-                or keys[pygame.K_RCTRL]
-                or keys[pygame.K_j]
-            )
+            attack_pressed = keys[pygame.K_LSHIFT]
             if (
                 attack_pressed
                 and not self.attack_was_pressed
                 and self.player.sword_ready
                 and self.player.sword_cooldown <= 0
+                and self.player.sword_charges > 0
             ):
                 slash = self.player.perform_sword_attack()
-                slash.follow(self.player.rect)
                 self.slashes.append(slash)
                 self.particles.extend(self._sparkle_effect(slash.rect.center))
                 self._apply_slash_damage(slash)
@@ -1343,6 +2125,14 @@ class MarioLikeGame:
             if spawned_projectiles:
                 self.projectiles.extend(spawned_projectiles)
 
+            boss_centre = self.levels.boss.rect.center if self.levels.boss else None
+            if self.levels.consume_boss_transition():
+                if self.levels.advance():
+                    self._transition_to_next_level(boss_centre)
+                else:
+                    self.victory()
+                return
+
             self.update_projectiles(dt)
             self.update_slashes(dt)
             self.handle_collisions(dt)
@@ -1350,16 +2140,19 @@ class MarioLikeGame:
                 return
 
             self.update_particles(dt)
+            self.update_jump_spheres(dt)
             self.camera.update(self.player.rect.centerx, self.levels.level_length)
             self.sky.update(dt)
             self.update_combo_timer(dt)
         else:
             self.sky.update(dt)
             self.update_particles(dt)
+            self.update_jump_spheres(dt)
             if self.projectiles:
                 self.update_projectiles(dt)
             if self.slashes:
                 self.update_slashes(dt)
+            self.nova_was_pressed = False
 
     def update_projectiles(self, dt: float) -> None:
         level_rects = [platform.rect for platform in self.levels.all_platforms]
@@ -1377,7 +2170,6 @@ class MarioLikeGame:
 
     def update_slashes(self, dt: float) -> None:
         for slash in list(self.slashes):
-            slash.follow(self.player.rect)
             if not slash.update(dt):
                 self.slashes.remove(slash)
                 continue
@@ -1389,23 +2181,35 @@ class MarioLikeGame:
             if particle.life <= 0:
                 self.particles.remove(particle)
 
+    def update_jump_spheres(self, dt: float) -> None:
+        for sphere in list(self.jump_spheres):
+            if not sphere.update(dt):
+                self.jump_spheres.remove(sphere)
+
     def update_combo_timer(self, dt: float) -> None:
         if self.combo_timer > 0:
             self.combo_timer = max(0.0, self.combo_timer - dt)
             if self.combo_timer == 0:
                 self.player.combo = 0
 
-    def _apply_slash_damage(self, slash: SlashEffect) -> None:
-        hitbox = slash.rect.inflate(12, 8)
+    def _apply_slash_damage(self, slash: SwordBeam) -> None:
+        hitbox = slash.rect.inflate(24, 12)
         scored = False
         for enemy in self.levels.enemies:
             if enemy.stomped:
                 continue
-            if hitbox.colliderect(enemy.rect):
-                enemy.stomped = True
-                enemy.death_timer = ENEMY_DEATH_DURATION
+            if not hitbox.colliderect(enemy.rect):
+                continue
+            outcome = enemy.take_hit()
+            if outcome == "ignored":
+                continue
+            if outcome == "killed":
                 scored = True
                 self.add_score(150, combo_bonus=True)
+            elif outcome == "damaged":
+                scored = True
+                self.score += 40
+            self.particles.extend(self._sparkle_effect(enemy.rect.center))
         for shooter in self.levels.shooters:
             if shooter.stomped:
                 continue
@@ -1419,6 +2223,15 @@ class MarioLikeGame:
                 self.projectiles.remove(projectile)
                 self.particles.extend(self._sparkle_effect(projectile.rect.center))
                 scored = True
+        boss = self.levels.boss
+        if boss and not boss.defeated:
+            boss_hitbox = boss.rect.inflate(-12, -12)
+            if hitbox.colliderect(boss_hitbox):
+                if boss.take_hit():
+                    scored = True
+                    self.add_score(450, combo_bonus=True)
+                    self.particles.extend(self._sparkle_effect(boss.rect.center))
+                    self.levels.on_boss_hit()
         if scored:
             centre = hitbox.center
             self.particles.extend(self._sparkle_effect(centre))
@@ -1433,13 +2246,18 @@ class MarioLikeGame:
             if player_rect.colliderect(enemy.rect):
                 landed = self.player.vel.y > 0 and player_rect.bottom - enemy.rect.top < 22
                 if landed:
-                    enemy.stomped = True
-                    enemy.death_timer = ENEMY_DEATH_DURATION
                     self.player.vel.y = PLAYER_JUMP * 0.6
                     self.player.on_ground = False
-                    self.add_score(150, combo_bonus=True)
-                    self.particles.extend(self.player.emit_jump_particles())
+                    outcome = enemy.take_hit()
+                    if outcome == "killed":
+                        self.add_score(150, combo_bonus=True)
+                        self.particles.extend(self.player.emit_jump_particles())
+                    elif outcome == "damaged":
+                        self.score += 40
+                        self.particles.extend(self._sparkle_effect(enemy.rect.center))
                 elif self.player.invincible_timer <= 0:
+                    if self._absorb_hit("enemy", player_rect.midtop):
+                        continue
                     self.lose_life("enemy")
                     return
 
@@ -1456,6 +2274,8 @@ class MarioLikeGame:
                     self.add_score(200, combo_bonus=True)
                     self.particles.extend(self.player.emit_jump_particles())
                 elif self.player.invincible_timer <= 0:
+                    if self._absorb_hit("laser", shooter.rect.midtop):
+                        continue
                     self.lose_life("laser")
                     return
 
@@ -1464,7 +2284,18 @@ class MarioLikeGame:
             if projectile.rect.colliderect(player_hitbox):
                 self.projectiles.remove(projectile)
                 if self.player.invincible_timer <= 0:
+                    if self._absorb_hit("projectile", projectile.rect.center):
+                        continue
                     self.lose_life("projectile")
+                return
+
+        boss = self.levels.boss
+        if boss and not boss.defeated:
+            boss_body = boss.rect.inflate(-18, -18)
+            if player_hitbox.colliderect(boss_body):
+                if self.player.invincible_timer <= 0:
+                    if not self._absorb_hit("boss", boss.rect.center):
+                        self.lose_life("boss")
                 return
 
         for coin in self.levels.coins:
@@ -1492,22 +2323,23 @@ class MarioLikeGame:
                 self.particles.extend(self._sparkle_effect(sword.rect.center))
                 self.add_score(75)
 
-        if self.levels.remaining_coins() == 0 and player_rect.colliderect(self.levels.goal.rect.inflate(40, 40)):
+        for shield in self.levels.shield_tokens:
+            if shield.collected:
+                continue
+            if player_hitbox.colliderect(shield.rect.inflate(6, 6)):
+                shield.collected = True
+                self.player.add_shield()
+                self.particles.extend(self._shield_pickup_effect(shield.rect.center))
+                self.add_score(60)
+
+        goal_ready = self.levels.remaining_coins() == 0
+        if self.levels.is_boss_stage():
+            goal_ready = goal_ready and (boss is None or boss.defeated)
+        if goal_ready and player_rect.colliderect(self.levels.goal.rect.inflate(40, 40)):
             bonus = max(0, int(2500 - self.time_elapsed * 30))
             self.add_score(500 + bonus)
             if self.levels.advance():
-                spawn_x, spawn_y = self.levels.spawn_point
-                self.player.rect.topleft = (spawn_x, spawn_y)
-                self.player.vel.xy = (0, 0)
-                self.player.double_jump_stock = 0
-                self.camera.x = 0
-                self.time_elapsed = 0.0
-                self.projectiles.clear()
-                self.slashes.clear()
-                self.particles.extend(self._sparkle_effect(self.levels.goal.rect.midtop))
-                self.sky.set_theme(self.levels.theme_index)
-                self.jump_was_pressed = False
-                self.attack_was_pressed = False
+                self._transition_to_next_level(self.levels.goal.rect.midtop)
             else:
                 self.victory()
 
@@ -1520,9 +2352,123 @@ class MarioLikeGame:
             combo_multiplier = 1 + 0.5 * (self.player.combo - 1)
             gained = int(base * combo_multiplier)
             self.combo_timer = 2.5
+            if self.player.combo >= 5 and not self.combo_nova_ready:
+                self.combo_nova_ready = True
         else:
             gained = base
         self.score += gained
+
+    def _transition_to_next_level(self, sparkle_pos: Tuple[int, int] | None = None) -> None:
+        spawn_x, spawn_y = self.levels.spawn_point
+        self.player.set_position((spawn_x, spawn_y))
+        self.player.vel.xy = (0, 0)
+        self.player.on_ground = False
+        self.player.double_jump_stock = 0
+        self.player.sword_charges = 0
+        self.player.sword_ready = False
+        self.player.sword_cooldown = 0.0
+        self.player.shield_charges = 0
+        self.camera.x = 0
+        self.time_elapsed = 0.0
+        self.projectiles.clear()
+        self.slashes.clear()
+        self.jump_spheres.clear()
+        self.combo_timer = 0.0
+        self.player.combo = 0
+        if sparkle_pos:
+            self.particles.extend(self._sparkle_effect(sparkle_pos))
+        self.sky.set_theme(self.levels.theme_index)
+        self.jump_was_pressed = False
+        self.attack_was_pressed = False
+        self.nova_was_pressed = False
+
+    def _shield_pickup_effect(self, pos: Tuple[int, int]) -> List[Particle]:
+        particles: List[Particle] = []
+        for _ in range(14):
+            angle = random.uniform(0, math.tau)
+            speed = random.uniform(140, 240)
+            vel = pygame.Vector2(math.cos(angle), math.sin(angle)) * speed
+            particles.append(
+                Particle(
+                    pos=pygame.Vector2(pos),
+                    vel=vel,
+                    life=random.uniform(0.35, 0.6),
+                    colour=pygame.Color(140, 230, 255),
+                    radius=random.uniform(2.5, 4.5),
+                )
+            )
+        return particles
+
+    def _shield_break_effect(self, pos: Tuple[int, int]) -> List[Particle]:
+        particles: List[Particle] = []
+        for _ in range(20):
+            angle = random.uniform(0, math.tau)
+            speed = random.uniform(200, 320)
+            vel = pygame.Vector2(math.cos(angle), math.sin(angle)) * speed
+            particles.append(
+                Particle(
+                    pos=pygame.Vector2(pos),
+                    vel=vel,
+                    life=random.uniform(0.25, 0.5),
+                    colour=pygame.Color(120, 200, 255),
+                    radius=random.uniform(2.0, 4.0),
+                )
+            )
+        return particles
+
+    def _absorb_hit(self, reason: str, impact_pos: Tuple[int, int]) -> bool:
+        if not self.player.consume_shield():
+            return False
+        self.player.invincible_timer = max(self.player.invincible_timer, 0.6)
+        self.particles.extend(self._shield_break_effect(impact_pos))
+        return True
+
+    def _trigger_combo_nova(self) -> None:
+        if not self.combo_nova_ready:
+            return
+        centre = pygame.Vector2(self.player.rect.center)
+        radius = 320
+        self.combo_nova_ready = False
+        self.combo_nova_cooldown = 8.0
+        self.player.combo = 0
+        self.combo_timer = 0.0
+        self.jump_spheres.append(
+            JumpSphereEffect(
+                centre=centre.copy(),
+                width=radius * 1.6,
+                height=radius * 0.9,
+                timer=0.55,
+                lifetime=0.55,
+            )
+        )
+        defeated = 0
+        for enemy in self.levels.enemies:
+            if enemy.stomped:
+                continue
+            distance = pygame.Vector2(enemy.rect.center).distance_to(centre)
+            if distance <= radius:
+                enemy.health = 0
+                enemy.stomped = True
+                enemy.death_timer = ENEMY_DEATH_DURATION
+                defeated += 1
+                self.particles.extend(self._sparkle_effect(enemy.rect.center))
+        for shooter in self.levels.shooters:
+            if shooter.stomped:
+                continue
+            distance = pygame.Vector2(shooter.rect.center).distance_to(centre)
+            if distance <= radius:
+                shooter.stomped = True
+                shooter.death_timer = ENEMY_DEATH_DURATION
+                defeated += 1
+                self.particles.extend(self._sparkle_effect(shooter.rect.center))
+        for projectile in list(self.projectiles):
+            distance = pygame.Vector2(projectile.rect.center).distance_to(centre)
+            if distance <= radius:
+                self.projectiles.remove(projectile)
+                self.particles.extend(self._sparkle_effect(projectile.rect.center))
+        if defeated > 0:
+            self.add_score(200 * defeated)
+        self.particles.extend(self._sparkle_effect((int(centre.x), int(centre.y))))
 
     def _sparkle_effect(self, pos: Tuple[int, int]) -> List[Particle]:
         particles = []
@@ -1572,12 +2518,22 @@ class MarioLikeGame:
             coin.draw(self.screen, self.camera.x)
         for powerup in self.levels.double_jump_orbs:
             powerup.draw(self.screen, self.camera.x)
+        for shield in self.levels.shield_tokens:
+            shield.draw(self.screen, self.camera.x)
         for sword in self.levels.sword_tokens:
             sword.draw(self.screen, self.camera.x)
-        if self.levels.remaining_coins() == 0:
+        if self.levels.boss:
+            self.levels.boss.draw(self.screen, self.camera.x)
+        show_goal = self.levels.remaining_coins() == 0
+        if self.levels.is_boss_stage():
+            boss = self.levels.boss
+            show_goal = show_goal and (boss is None or boss.defeated)
+        if show_goal:
             self.levels.goal.draw(self.screen, self.camera.x)
         for projectile in self.projectiles:
             projectile.draw(self.screen, self.camera.x)
+        for sphere in self.jump_spheres:
+            sphere.draw(self.screen, self.camera.x)
         for slash in self.slashes:
             slash.draw(self.screen, self.camera.x)
         self.player.draw(self.screen, self.camera.x)
@@ -1588,7 +2544,6 @@ class MarioLikeGame:
         draw_text(self.screen, f"Score: {self.score}", (20, 20))
         draw_text(self.screen, f"Level: {self.levels.level_index + 1}/{self.levels.total_levels}", (20, 60))
         theme_name = BACKGROUND_THEMES[self.levels.theme_index]["name"]
-        draw_text(self.screen, f"Theme: {theme_name}", (20, 90), colour=SMOKE)
         heart_y = 110
         for i in range(self.max_lives):
             centre = (30 + i * 38, heart_y)
@@ -1596,19 +2551,91 @@ class MarioLikeGame:
             colour = CRIMSON if filled else pygame.Color(70, 70, 70)
             outline = pygame.Color(255, 255, 255) if filled else pygame.Color(120, 120, 120)
             draw_heart(self.screen, centre, 28, colour, outline)
+        draw_text(self.screen, f"Theme: {theme_name}", (20, heart_y + 36), colour=SMOKE)
+        boss = self.levels.boss
+        if self.levels.is_boss_stage() and boss and not boss.defeated:
+            draw_text(
+                self.screen,
+                "Boss shrugs off stomps—grab swords and fire L-Shift beams!",
+                (SCREEN_WIDTH // 2, 18),
+                colour=NEON_GREEN,
+                anchor="midtop",
+            )
+        status_y = 20
+        if self.levels.is_boss_stage() and boss:
+            if not boss.defeated:
+                draw_text(
+                    self.screen,
+                    f"Boss HP: {max(boss.health, 0)}",
+                    (SCREEN_WIDTH - 20, status_y),
+                    colour=VOID_PURPLE,
+                    anchor="topright",
+                )
+                status_y += 32
         if self.levels.remaining_coins() > 0:
-            draw_text(self.screen, f"Collect {self.levels.remaining_coins()} more star shards!", (SCREEN_WIDTH - 20, 20), anchor="topright")
-        info_y = 60
+            draw_text(
+                self.screen,
+                f"Collect {self.levels.remaining_coins()} more star shards!",
+                (SCREEN_WIDTH - 20, status_y),
+                anchor="topright",
+            )
+        info_y = max(status_y + 40, 60)
         if self.player.combo > 1:
             draw_text(self.screen, f"Combo x{self.player.combo}", (SCREEN_WIDTH - 20, info_y), colour=CYAN, anchor="topright")
             info_y += 32
         if self.player.double_jump_stock > 0:
-            draw_text(self.screen, "Double Jump Ready", (SCREEN_WIDTH - 20, info_y), colour=MINT, anchor="topright")
+            draw_text(
+                self.screen,
+                f"Double Jump x{self.player.double_jump_stock}",
+                (SCREEN_WIDTH - 20, info_y),
+                colour=MINT,
+                anchor="topright",
+            )
             info_y += 28
-        if self.player.sword_ready:
-            draw_text(self.screen, "Sword Ready", (SCREEN_WIDTH - 20, info_y), colour=NEON_GREEN, anchor="topright")
+        if self.player.shield_charges > 0:
+            draw_text(
+                self.screen,
+                f"Shield x{self.player.shield_charges}",
+                (SCREEN_WIDTH - 20, info_y),
+                colour=pygame.Color(150, 230, 255),
+                anchor="topright",
+            )
+            info_y += 28
+        if self.player.sword_ready and self.player.sword_charges > 0:
+            draw_text(
+                self.screen,
+                f"Sword x{self.player.sword_charges}",
+                (SCREEN_WIDTH - 20, info_y),
+                colour=NEON_GREEN,
+                anchor="topright",
+            )
+            info_y += 28
         elif self.player.sword_cooldown > 0:
-            draw_text(self.screen, "Sword cooling", (SCREEN_WIDTH - 20, info_y), colour=pygame.Color(180, 200, 200), anchor="topright")
+            draw_text(
+                self.screen,
+                f"Sword cooling {self.player.sword_cooldown:.1f}s",
+                (SCREEN_WIDTH - 20, info_y),
+                colour=pygame.Color(180, 200, 200),
+                anchor="topright",
+            )
+            info_y += 28
+        if self.combo_nova_ready:
+            draw_text(
+                self.screen,
+                "Nova Ready (E)",
+                (SCREEN_WIDTH - 20, info_y),
+                colour=GOLD,
+                anchor="topright",
+            )
+        elif self.combo_nova_cooldown > 0:
+            draw_text(
+                self.screen,
+                f"Nova {self.combo_nova_cooldown:.1f}s",
+                (SCREEN_WIDTH - 20, info_y),
+                colour=pygame.Color(200, 210, 255),
+                anchor="topright",
+            )
+
 
     def _draw_menu(self) -> None:
         draw_text(self.screen, "Neon Night Run", (SCREEN_WIDTH // 2, 160), font=TITLE_FONT, colour=GOLD, anchor="center")
