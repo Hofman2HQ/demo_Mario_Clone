@@ -99,6 +99,7 @@ SMOKE = pygame.Color(200, 235, 255)
 GRAVITY = 0.65
 PLAYER_SPEED = 6
 PLAYER_JUMP = -15.5
+MAX_FALL_SPEED = 24.0
 CAMERA_LERP = 0.12
 ENEMY_DEATH_DURATION = 0.35
 PROJECTILE_SPEED = 420
@@ -115,6 +116,10 @@ MOVING_BOUNCY_CHANCE = 0.28
 MAX_DOUBLE_JUMP_STACK = 3
 MAX_SWORD_CHARGES = 4
 MAX_SHIELD_CHARGES = 3
+HIT_INVINC_DURATION = 2.5
+FALL_RESPAWN_INVULN = 1.4
+COMBO_NOVA_RADIUS = 400
+STOMP_PROTECT_DURATION = 0.25
 
 FONT = pygame.font.Font(None, 36)
 TITLE_FONT = pygame.font.Font(None, 96)
@@ -233,6 +238,7 @@ class MovingPlatform(Platform):
     direction_x: int = 1
     direction_y: int = 1
     _float_pos: pygame.Vector2 = field(default_factory=lambda: pygame.Vector2(0, 0))
+    last_move: pygame.Vector2 = field(default_factory=lambda: pygame.Vector2(0, 0), init=False)
 
     def __post_init__(self) -> None:
         self._float_pos = pygame.Vector2(self.rect.topleft)
@@ -240,9 +246,11 @@ class MovingPlatform(Platform):
             self.bounds_x = (self.rect.left, self.rect.left)
         if self.bounds_y == (0, 0):
             self.bounds_y = (self.rect.top, self.rect.top)
+        self.last_move = pygame.Vector2(0, 0)
 
     def update(self, dt: float, obstacles: Sequence[pygame.Rect] | None = None) -> None:
         obstacles = obstacles or ()
+        previous_pos = self._float_pos.copy()
         proposed_x = self._float_pos.x
         proposed_y = self._float_pos.y
         if self.speed_x:
@@ -279,10 +287,12 @@ class MovingPlatform(Platform):
                 self.direction_x *= -1
             if self.speed_y:
                 self.direction_y *= -1
+            self.last_move.xy = (0, 0)
             self._float_pos = pygame.Vector2(self.rect.topleft)
             return
         self._float_pos.xy = (proposed_x, proposed_y)
         self.rect.topleft = candidate_rect.topleft
+        self.last_move.xy = (self._float_pos.x - previous_pos.x, self._float_pos.y - previous_pos.y)
 
 
 def clone_platform(source: Platform) -> Platform:
@@ -445,6 +455,7 @@ class Player:
     _float_pos: pygame.Vector2 = field(init=False)
     _pending_bounce: Platform | None = field(default=None, init=False)
     _pending_double_jump_effect: bool = field(default=False, init=False)
+    ground_platform: Platform | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self._float_pos = pygame.Vector2(self.rect.topleft)
@@ -504,6 +515,7 @@ class Player:
         self.vel.y = PLAYER_JUMP
         self.on_ground = False
         self.airborne_time = 0.0
+        self.ground_platform = None
         self._pending_double_jump_effect = False
 
     def can_double_jump(self) -> bool:
@@ -517,22 +529,30 @@ class Player:
 
     def update(self, platforms: Sequence[Platform], dt: float) -> List[Particle]:
         particles: List[Particle] = []
+        if self.ground_platform and isinstance(self.ground_platform, MovingPlatform):
+            motion = self.ground_platform.last_move
+            if motion.x or motion.y:
+                self._float_pos.x += motion.x
+                self._float_pos.y += motion.y
+                self.rect.topleft = (int(round(self._float_pos.x)), int(round(self._float_pos.y)))
         frame_scale = clamp(dt * FPS, 0.0, 2.0)
         previous_bottom = self.rect.bottom
         previous_top = self.rect.top
         was_on_ground = self.on_ground
         self.animation_time += dt
         self.apply_gravity(frame_scale)
+        self.vel.y = min(self.vel.y, MAX_FALL_SPEED)
+        self._pending_bounce = None
+        self._resolve_initial_overlap(platforms)
 
-        self._float_pos.x += self.vel.x * frame_scale
-        self.rect.x = int(round(self._float_pos.x))
-        self._horizontal_collisions(platforms)
-        self._float_pos.x = float(self.rect.x)
+        delta_x = self.vel.x * frame_scale
+        if delta_x != 0.0:
+            self._horizontal_collisions(platforms, delta_x)
+        else:
+            self._float_pos.x = float(self.rect.x)
 
-        self._float_pos.y += self.vel.y * frame_scale
-        self.rect.y = int(round(self._float_pos.y))
-        landed = self._vertical_collisions(platforms, previous_bottom, previous_top, was_on_ground)
-        self._float_pos.y = float(self.rect.y)
+        delta_y = self.vel.y * frame_scale
+        landed = self._vertical_collisions(platforms, delta_y, previous_bottom, previous_top, was_on_ground)
 
         if self.on_ground:
             self.airborne_time = 0.0
@@ -551,62 +571,184 @@ class Player:
             self.sword_ready = self.sword_charges > 0
         return particles
 
-    def _horizontal_collisions(self, platforms: Sequence[Platform]) -> None:
-        for platform in platforms:
-            if not self.rect.colliderect(platform.rect):
-                continue
-            overlap = self.rect.clip(platform.rect)
-            if overlap.width == 0 or overlap.width > overlap.height:
-                continue
-            if self.vel.x > 0:
-                self.rect.right = platform.rect.left
-            elif self.vel.x < 0:
-                self.rect.left = platform.rect.right
-            else:
-                if self.rect.centerx >= platform.rect.centerx:
-                    self.rect.left = platform.rect.right
+    def _resolve_initial_overlap(self, platforms: Sequence[Platform]) -> None:
+        attempts = 0
+        while attempts < 4:
+            overlap_found = False
+            for platform in platforms:
+                if not self.rect.colliderect(platform.rect):
+                    continue
+                overlap = self.rect.clip(platform.rect)
+                if overlap.width <= 0 or overlap.height <= 0:
+                    continue
+                overlap_found = True
+                if overlap.width < overlap.height:
+                    if self.rect.centerx < platform.rect.centerx:
+                        self.rect.right = platform.rect.left
+                    else:
+                        self.rect.left = platform.rect.right
+                    self._float_pos.x = float(self.rect.x)
+                    self.vel.x = 0.0
+                    self.ground_platform = None
                 else:
-                    self.rect.right = platform.rect.left
+                    if self.rect.centery < platform.rect.centery:
+                        self.rect.bottom = platform.rect.top
+                        self.on_ground = True
+                        self.ground_platform = platform
+                    else:
+                        self.rect.top = platform.rect.bottom
+                        self.ground_platform = None
+                    self._float_pos.y = float(self.rect.y)
+                    self.vel.y = 0.0
+                break
+            if not overlap_found:
+                break
+            attempts += 1
+
+    def _horizontal_collisions(self, platforms: Sequence[Platform], delta_x: float) -> None:
+        left = self._float_pos.x
+        right = left + self.rect.width
+        top = self.rect.top
+        bottom = self.rect.bottom
+        target_left = left + delta_x
+        target_right = right + delta_x
+        move = delta_x
+        collided: Platform | None = None
+
+        if delta_x > 0:
+            for platform in platforms:
+                rect = platform.rect
+                if bottom <= rect.top or top >= rect.bottom:
+                    continue
+                if right <= rect.left and target_right > rect.left:
+                    distance = rect.left - right
+                    if distance < move:
+                        move = max(distance, 0.0)
+                        collided = platform
+        else:
+            for platform in platforms:
+                rect = platform.rect
+                if bottom <= rect.top or top >= rect.bottom:
+                    continue
+                if left >= rect.right and target_left < rect.right:
+                    distance = rect.right - left
+                    if distance > move:
+                        move = min(distance, 0.0)
+                        collided = platform
+
+        self._float_pos.x += move
+        self.rect.x = int(round(self._float_pos.x))
+        if collided:
+            if delta_x > 0:
+                self.rect.right = collided.rect.left
+            else:
+                self.rect.left = collided.rect.right
             self._float_pos.x = float(self.rect.x)
             self.vel.x = 0.0
 
     def _vertical_collisions(
         self,
         platforms: Sequence[Platform],
+        delta_y: float,
         previous_bottom: int,
         previous_top: int,
         was_on_ground: bool,
     ) -> bool:
+        if delta_y == 0.0:
+            self._float_pos.y = float(self.rect.y)
+            return False
+
+        left = self.rect.left
+        right = self.rect.right
+        top = self._float_pos.y
+        bottom = top + self.rect.height
+        target_top = top + delta_y
+        target_bottom = bottom + delta_y
+        move = delta_y
+        collided: Platform | None = None
         landed = False
-        self.on_ground = False
-        for platform in platforms:
-            if self.rect.colliderect(platform.rect):
-                overlap = self.rect.clip(platform.rect)
-                if overlap.height == 0 or overlap.height > overlap.width:
+
+        if delta_y > 0:
+            for platform in platforms:
+                rect = platform.rect
+                if right <= rect.left or left >= rect.right:
                     continue
-                approach_from_above = previous_bottom <= platform.rect.top + 2
-                approach_from_below = previous_top >= platform.rect.bottom - 2
-                if self.vel.y >= 0 and approach_from_above:
+                if bottom <= rect.top and target_bottom > rect.top:
+                    gap = rect.top - bottom
+                    if gap < move:
+                        move = max(gap, 0.0)
+                        collided = platform
+        else:
+            for platform in platforms:
+                rect = platform.rect
+                if right <= rect.left or left >= rect.right:
+                    continue
+                if top >= rect.bottom and target_top < rect.bottom:
+                    gap = rect.bottom - top
+                    if gap > move:
+                        move = min(gap, 0.0)
+                        collided = platform
+
+        self._float_pos.y += move
+        self.rect.y = int(round(self._float_pos.y))
+        self.on_ground = False
+        ground_platform: Platform | None = None
+
+        if collided:
+            if delta_y > 0:
+                self.rect.bottom = collided.rect.top
+                self._float_pos.y = float(self.rect.y)
+                if collided.is_bouncy:
+                    self.vel.y = collided.bounce_velocity
+                    self.on_ground = False
+                    self._pending_bounce = collided
+                    ground_platform = None
+                else:
+                    self.vel.y = 0.0
+                    self.on_ground = True
+                    ground_platform = collided
+                    if not was_on_ground and previous_bottom <= collided.rect.top + 2:
+                        landed = True
+            else:
+                self.rect.top = collided.rect.bottom
+                self._float_pos.y = float(self.rect.y)
+                self.vel.y = 0.0
+                ground_platform = None
+        else:
+            for platform in platforms:
+                if not self.rect.colliderect(platform.rect):
+                    continue
+                overlap = self.rect.clip(platform.rect)
+                if overlap.height <= 0:
+                    continue
+                if self.rect.centery <= platform.rect.centery:
                     self.rect.bottom = platform.rect.top
                     self._float_pos.y = float(self.rect.y)
                     if platform.is_bouncy:
                         self.vel.y = platform.bounce_velocity
-                        self.on_ground = False
                         self._pending_bounce = platform
+                        self.on_ground = False
+                        ground_platform = None
                     else:
                         self.vel.y = 0.0
                         self.on_ground = True
-                        if not was_on_ground:
-                            landed = previous_bottom <= platform.rect.top + 2
-                elif self.vel.y > 0 and not approach_from_above:
-                    self.rect.bottom = platform.rect.top
-                    self._float_pos.y = float(self.rect.y)
-                    self.vel.y = 0.0
-                    self.on_ground = True
-                elif self.vel.y <= 0 and approach_from_below:
+                        ground_platform = platform
+                        if not was_on_ground and previous_bottom <= platform.rect.top + 2:
+                            landed = True
+                    break
+                else:
                     self.rect.top = platform.rect.bottom
-                    self.vel.y = 0.0
                     self._float_pos.y = float(self.rect.y)
+                    self.vel.y = 0.0
+                    ground_platform = None
+                    break
+
+        if self.on_ground and self.vel.y > 0:
+            self.vel.y = 0.0
+        if not self.on_ground:
+            ground_platform = None
+        self.ground_platform = ground_platform
+
         return landed
 
     def _spawn_landing_particles(self) -> List[Particle]:
@@ -935,6 +1077,13 @@ class Boss:
     anchor_index: int = 0
     move_timer: float = 0.0
     pulse: float = field(default_factory=lambda: random.random() * math.tau)
+    roam_bounds: pygame.Rect = field(init=False)
+    roam_target: pygame.Vector2 = field(init=False)
+
+    def __post_init__(self) -> None:
+        self._setup_roam_area()
+        self.roam_target = pygame.Vector2(self.rect.center)
+        self._pick_new_roam_target(force=True)
 
     def clone(self) -> "Boss":
         return Boss(
@@ -958,22 +1107,7 @@ class Boss:
             self.celebration_timer = max(0.0, self.celebration_timer - dt)
             return self.celebration_timer > 0, projectiles
 
-        if self.anchors:
-            target = self.anchors[self.anchor_index]
-            current = pygame.Vector2(self.rect.center)
-            delta = target - current
-            if delta.length_squared() > 9:
-                direction = delta.normalize()
-                step = direction * self.speed * dt
-                if step.length() > delta.length():
-                    step = delta
-                self.rect.centerx += int(round(step.x))
-                self.rect.centery += int(round(step.y))
-            else:
-                self.move_timer += dt
-                if self.move_timer >= 0.55:
-                    self.anchor_index = (self.anchor_index + 1) % len(self.anchors)
-                    self.move_timer = 0.0
+        self._update_roaming(dt)
 
         self.attack_cooldown -= dt
         if self.attack_cooldown <= 0:
@@ -984,6 +1118,76 @@ class Boss:
             self.invulnerable = max(0.0, self.invulnerable - dt)
 
         return True, projectiles
+
+    def _setup_roam_area(self) -> None:
+        if self.anchors:
+            xs = [anchor.x for anchor in self.anchors]
+            ys = [anchor.y for anchor in self.anchors]
+            left = min(xs) - 120
+            right = max(xs) + 120
+            top = min(ys) - 140
+            bottom = min(max(ys) + 80, min(ys) + 220)
+        else:
+            left = self.rect.centerx - 200
+            right = self.rect.centerx + 200
+            top = self.rect.centery - 180
+            bottom = self.rect.centery + 80
+        left = int(left)
+        top = int(max(40, top))
+        right = int(max(left + 10, right))
+        bottom = int(max(top + 120, bottom))
+        width = max(160, right - left)
+        height = max(120, bottom - top)
+        self.roam_bounds = pygame.Rect(left, top, width, height)
+
+    def _pick_new_roam_target(self, *, force: bool = False) -> None:
+        margin_x = self.rect.width * 0.5 + 24
+        margin_y = self.rect.height * 0.5 + 24
+        left = self.roam_bounds.left + margin_x
+        right = self.roam_bounds.right - margin_x
+        top = self.roam_bounds.top + margin_y
+        bottom = self.roam_bounds.bottom - margin_y
+        if right <= left:
+            right = left
+        if bottom <= top:
+            bottom = top
+        self.roam_target = pygame.Vector2(
+            random.uniform(left, right) if right > left else left,
+            random.uniform(top, bottom) if bottom > top else top,
+        )
+        if not force:
+            self.move_timer = random.uniform(0.35, 0.8)
+        else:
+            self.move_timer = 0.0
+
+    def _update_roaming(self, dt: float) -> None:
+        current = pygame.Vector2(self.rect.center)
+        distance = current.distance_to(self.roam_target)
+        if distance <= 8:
+            if self.move_timer > 0:
+                self.move_timer = max(0.0, self.move_timer - dt)
+                if self.move_timer > 0:
+                    return
+            self._pick_new_roam_target()
+            return
+        direction = self.roam_target - current
+        if direction.length_squared() <= 0:
+            return
+        direction = direction.normalize()
+        direction.y += math.sin(self.pulse * 1.6) * 0.04
+        step = direction * self.speed * dt
+        if step.length() > distance:
+            step = self.roam_target - current
+        self.rect.centerx += int(round(step.x))
+        self.rect.centery += int(round(step.y))
+        half_w = self.rect.width // 2
+        half_h = self.rect.height // 2
+        self.rect.centerx = int(
+            clamp(self.rect.centerx, self.roam_bounds.left + half_w, self.roam_bounds.right - half_w)
+        )
+        self.rect.centery = int(
+            clamp(self.rect.centery, self.roam_bounds.top + half_h, self.roam_bounds.bottom - half_h)
+        )
 
     def _spawn_waves(self, player_rect: pygame.Rect) -> List[Projectile]:
         projectiles: List[Projectile] = []
@@ -1974,6 +2178,7 @@ class MarioLikeGame:
         self.sky = ParallaxSky(SCREEN_WIDTH, SCREEN_HEIGHT)
         self.camera = Camera()
         self.state = GameState.MENU
+        self.hard_mode = False
         self.levels = LevelManager()
         spawn_x, spawn_y = self.levels.spawn_point
         self.player = Player(pygame.Rect(spawn_x, spawn_y, 44, 60))
@@ -2028,39 +2233,63 @@ class MarioLikeGame:
         self.state = GameState.VICTORY
 
     def lose_life(self, reason: str) -> None:
-        if self.state != GameState.PLAYING:
+        if self.state != GameState.PLAYING or self.player.invincible_timer > 0:
             return
         self.lives -= 1
         if self.lives <= 0:
             self.lives = 0
             self.game_over()
             return
+        self._apply_damage_penalties()
+        if self.hard_mode:
+            self._restart_level_after_life_loss()
+            return
+        if reason == "fall":
+            self._respawn_at_spawn()
+            return
+        self._phase_player_after_hit()
+
+    def _apply_damage_penalties(self) -> None:
         self.combo_timer = 0.0
         self.player.combo = 0
-        self.player.invincible_timer = 1.2
-        self.levels.reset_level()
-        spawn_x, spawn_y = self.levels.spawn_point
-        self.player.set_position((spawn_x, spawn_y))
-        self.player.vel.xy = (0, 0)
-        self.player.on_ground = False
         self.player.double_jump_stock = 0
         self.player.sword_ready = False
         self.player.sword_cooldown = 0.0
         self.player.sword_charges = 0
         self.player.shield_charges = 0
+        self.combo_nova_ready = False
+        self.combo_nova_cooldown = 0.0
+        self.player.vel.xy = (0, 0)
+        self.player.on_ground = False
+        self.player.invincible_timer = 0.0
+        self.jump_was_pressed = False
+        self.attack_was_pressed = False
+        self.nova_was_pressed = False
+
+    def _restart_level_after_life_loss(self) -> None:
+        self.player.invincible_timer = 1.2
+        self.levels.reset_level()
+        spawn_x, spawn_y = self.levels.spawn_point
+        self.player.set_position((spawn_x, spawn_y))
         self.time_elapsed = 0.0
         self.camera.x = 0
         self.projectiles.clear()
         self.slashes.clear()
         self.particles.clear()
-        self.particles.extend(self._sparkle_effect(self.player.rect.midbottom))
-        self.jump_was_pressed = False
-        self.attack_was_pressed = False
         self.jump_spheres.clear()
-        self.combo_nova_ready = False
-        self.combo_nova_cooldown = 0.0
-        self.nova_was_pressed = False
+        self.particles.extend(self._sparkle_effect(self.player.rect.midbottom))
         self.sky.set_theme(self.levels.theme_index)
+
+    def _respawn_at_spawn(self) -> None:
+        spawn_x, spawn_y = self.levels.spawn_point
+        self.player.set_position((spawn_x, spawn_y))
+        self.player.invincible_timer = max(self.player.invincible_timer, FALL_RESPAWN_INVULN)
+        self.camera.x = 0
+        self.particles.extend(self._sparkle_effect(self.player.rect.midbottom))
+
+    def _phase_player_after_hit(self) -> None:
+        self.player.invincible_timer = max(self.player.invincible_timer, HIT_INVINC_DURATION)
+        self.particles.extend(self._sparkle_effect(self.player.rect.midbottom))
 
     # ------------------------------ Update ------------------------------
     def update(self, dt: float) -> None:
@@ -2248,6 +2477,9 @@ class MarioLikeGame:
                 if landed:
                     self.player.vel.y = PLAYER_JUMP * 0.6
                     self.player.on_ground = False
+                    self.player.rect.bottom = enemy.rect.top
+                    self.player._float_pos.y = float(self.player.rect.y)
+                    self.player.invincible_timer = max(self.player.invincible_timer, STOMP_PROTECT_DURATION)
                     outcome = enemy.take_hit()
                     if outcome == "killed":
                         self.add_score(150, combo_bonus=True)
@@ -2427,7 +2659,7 @@ class MarioLikeGame:
         if not self.combo_nova_ready:
             return
         centre = pygame.Vector2(self.player.rect.center)
-        radius = 320
+        radius = COMBO_NOVA_RADIUS
         self.combo_nova_ready = False
         self.combo_nova_cooldown = 8.0
         self.player.combo = 0
@@ -2552,6 +2784,9 @@ class MarioLikeGame:
             outline = pygame.Color(255, 255, 255) if filled else pygame.Color(120, 120, 120)
             draw_heart(self.screen, centre, 28, colour, outline)
         draw_text(self.screen, f"Theme: {theme_name}", (20, heart_y + 36), colour=SMOKE)
+        mode_label = "Hard Mode" if self.hard_mode else "Normal Mode"
+        mode_colour = CRIMSON if self.hard_mode else CYAN
+        draw_text(self.screen, f"Mode: {mode_label}", (20, heart_y + 64), colour=mode_colour)
         boss = self.levels.boss
         if self.levels.is_boss_stage() and boss and not boss.defeated:
             draw_text(
@@ -2635,6 +2870,14 @@ class MarioLikeGame:
                 colour=pygame.Color(200, 210, 255),
                 anchor="topright",
             )
+        if self.player.invincible_timer > 0:
+            draw_text(
+                self.screen,
+                f"Invincible {self.player.invincible_timer:.1f}s",
+                (SCREEN_WIDTH - 20, info_y + 32),
+                colour=SMOKE,
+                anchor="topright",
+            )
 
 
     def _draw_menu(self) -> None:
@@ -2643,6 +2886,10 @@ class MarioLikeGame:
         draw_text(self.screen, "Arrow keys / WASD to move, Space to jump", (SCREEN_WIDTH // 2, 360), anchor="center")
         draw_text(self.screen, "Collect all star shards before touching the flag!", (SCREEN_WIDTH // 2, 400), anchor="center")
         draw_text(self.screen, "Keep your hearts safe - three hits ends the run!", (SCREEN_WIDTH // 2, 440), anchor="center")
+        mode_text = "Hard Mode: ON" if self.hard_mode else "Hard Mode: OFF"
+        mode_colour = CRIMSON if self.hard_mode else CYAN
+        draw_text(self.screen, mode_text, (SCREEN_WIDTH // 2, 500), colour=mode_colour, anchor="center")
+        draw_text(self.screen, "Press H to toggle Hard Mode", (SCREEN_WIDTH // 2, 540), colour=SMOKE, anchor="center")
 
     def _draw_pause_overlay(self) -> None:
         overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
@@ -2684,6 +2931,9 @@ class MarioLikeGame:
                 elif event.key == pygame.K_RETURN:
                     if self.state in (GameState.MENU, GameState.GAME_OVER, GameState.VICTORY):
                         self.start_game()
+                elif event.key == pygame.K_h:
+                    if self.state in (GameState.MENU, GameState.GAME_OVER, GameState.VICTORY, GameState.PAUSED):
+                        self.hard_mode = not self.hard_mode
                 elif event.key == pygame.K_r and self.state == GameState.PLAYING:
                     self.start_game()
 
