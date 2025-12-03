@@ -20,7 +20,7 @@ import math
 import random
 import sys
 from dataclasses import dataclass, field
-from typing import List, Sequence, Tuple
+from typing import List, Sequence, Tuple, Optional
 
 import pygame
 
@@ -33,6 +33,12 @@ pygame.init()
 SCREEN_WIDTH = 960
 SCREEN_HEIGHT = 600
 FPS = 60
+
+AVAILABLE_RESOLUTIONS: List[Tuple[int, int]] = [
+    (960, 600),
+    (1280, 720),
+    (1600, 900)
+]
 
 # Colours
 MIDNIGHT = pygame.Color(14, 16, 40)
@@ -58,6 +64,9 @@ PLASMA_CORE = pygame.Color(255, 255, 255)
 BOUNCY_CORAL = pygame.Color(255, 160, 140)
 BOUNCY_TOP = pygame.Color(255, 220, 200)
 VOID_PURPLE = pygame.Color(96, 60, 180)
+RIFT_TEAL = pygame.Color(110, 255, 240)
+RIFT_DEEP = pygame.Color(36, 28, 90)
+RIFT_GLOW = pygame.Color(220, 255, 255)
 
 BACKGROUND_THEMES = [
     {
@@ -87,6 +96,13 @@ BACKGROUND_THEMES = [
         "bottom": pygame.Color(120, 0, 180),
         "moon": pygame.Color(200, 210, 255),
         "stars": pygame.Color(255, 255, 255),
+    },
+    {
+        "name": "Prismatic Rift",
+        "top": pygame.Color(8, 14, 46),
+        "bottom": pygame.Color(90, 20, 150),
+        "moon": pygame.Color(255, 250, 240),
+        "stars": pygame.Color(210, 255, 250),
     },
 ]
 
@@ -200,9 +216,19 @@ class Platform:
     colour: pygame.Color = field(default_factory=lambda: pygame.Color(BRICK))
     is_bouncy: bool = False
     bounce_velocity: float = PLAYER_JUMP
+    style: str = "standard"
 
     def draw(self, surface: pygame.Surface, camera_x: float) -> None:
         offset = self.rect.move(-camera_x, 0)
+        if self.style == "rift":
+            self._draw_rift(surface, offset)
+            return
+        if self.style == "arena":
+            self._draw_arena(surface, offset)
+            return
+        if self.style == "pillar":
+            self._draw_pillar(surface, offset)
+            return
         pygame.draw.rect(surface, self.colour, offset, border_radius=4)
         if self.is_bouncy:
             pad = offset.inflate(-6, -4)
@@ -228,6 +254,111 @@ class Platform:
             grass_top = pygame.Rect(offset.x, offset.y, offset.width, 12)
             pygame.draw.rect(surface, GRASS, grass_top, border_radius=6)
 
+    def _draw_rift(self, surface: pygame.Surface, offset: pygame.Rect) -> None:
+        top_rect = pygame.Rect(offset.x, offset.y, offset.width, offset.height)
+        if top_rect.width <= 0 or top_rect.height <= 0:
+            return
+        gradient = pygame.Surface((top_rect.width, top_rect.height), pygame.SRCALPHA)
+        base_colour = pygame.Color(self.colour)
+        for y in range(top_rect.height):
+            blend = y / max(1, top_rect.height - 1)
+            r = int(clamp(lerp(base_colour.r * 0.5 + 40, min(255, base_colour.r + 90), blend), 0, 255))
+            g = int(clamp(lerp(base_colour.g * 0.5 + 60, min(255, base_colour.g + 50), blend), 0, 255))
+            b = int(clamp(lerp(base_colour.b * 0.6 + 70, min(255, base_colour.b + 30), blend), 0, 255))
+            pygame.draw.line(gradient, (r, g, b, 255), (0, y), (top_rect.width, y))
+        surface.blit(gradient, top_rect.topleft)
+        pygame.draw.rect(surface, RIFT_GLOW, top_rect, width=2, border_radius=12)
+
+        depth = max(28, int(top_rect.height * 1.5))
+        skew = max(24, top_rect.width // 5)
+        front_points = [
+            (top_rect.left, top_rect.bottom),
+            (top_rect.right, top_rect.bottom),
+            (top_rect.right + skew, top_rect.bottom + depth),
+            (top_rect.left - skew, top_rect.bottom + depth),
+        ]
+        pygame.draw.polygon(surface, RIFT_DEEP, front_points)
+        glow_points = [
+            (top_rect.left, top_rect.bottom),
+            (top_rect.left - skew // 2, top_rect.bottom + depth // 2),
+            (top_rect.right + skew // 2, top_rect.bottom + depth // 2),
+            (top_rect.right, top_rect.bottom),
+        ]
+        pygame.draw.polygon(surface, pygame.Color(RIFT_GLOW.r, RIFT_GLOW.g, RIFT_GLOW.b, 90), glow_points)
+
+        inner = pygame.Rect(
+            top_rect.left + 14,
+            top_rect.top + 10,
+            max(12, top_rect.width - 28),
+            max(6, top_rect.height - 20),
+        )
+        inner_surface = pygame.Surface(inner.size, pygame.SRCALPHA)
+        pygame.draw.rect(inner_surface, pygame.Color(80, 255, 230, 140), inner_surface.get_rect(), border_radius=10)
+        pygame.draw.rect(inner_surface, pygame.Color(255, 255, 255, 110), inner_surface.get_rect(), 2, border_radius=10)
+        surface.blit(inner_surface, inner.topleft)
+
+        rib_count = max(2, top_rect.width // 80)
+        for idx in range(1, rib_count + 1):
+            t = idx / (rib_count + 1)
+            rib_x = int(lerp(top_rect.left + 18, top_rect.right - 18, t))
+            ribbon_top = top_rect.top + 6
+            ribbon_bottom = top_rect.bottom + depth - 12
+            pygame.draw.line(
+                surface,
+                pygame.Color(120, 255, 250, 120),
+                (rib_x, ribbon_top),
+                (rib_x + skew // 4, ribbon_bottom),
+                2,
+            )
+
+    def _draw_arena(self, surface: pygame.Surface, offset: pygame.Rect) -> None:
+        if offset.width <= 0 or offset.height <= 0:
+            return
+        tile = pygame.Surface(offset.size, pygame.SRCALPHA)
+        pygame.draw.rect(tile, self.colour, tile.get_rect(), border_radius=18)
+        grid = pygame.Surface(offset.size, pygame.SRCALPHA)
+        step = max(44, min(72, offset.width // 12))
+        grid_colour = pygame.Color(255, 255, 255, 26)
+        for x in range(0, offset.width, step):
+            pygame.draw.line(grid, grid_colour, (x, 0), (x, offset.height))
+        for y in range(0, offset.height, step):
+            pygame.draw.line(grid, pygame.Color(255, 255, 255, 18), (0, y), (offset.width, y))
+        tile.blit(grid, (0, 0), special_flags=pygame.BLEND_ADD)
+        border = tile.get_rect().inflate(-max(12, offset.width // 9), -max(12, offset.height // 9))
+        pygame.draw.rect(tile, pygame.Color(210, 240, 255, 90), border, width=3, border_radius=16)
+        surface.blit(tile, offset.topleft)
+
+    def _draw_pillar(self, surface: pygame.Surface, offset: pygame.Rect) -> None:
+        if offset.width <= 0 or offset.height <= 0:
+            return
+        pillar = pygame.Surface(offset.size, pygame.SRCALPHA)
+        body_rect = pillar.get_rect()
+        base_colour = pygame.Color(self.colour)
+        pygame.draw.rect(pillar, base_colour, body_rect, border_radius=14)
+        gradient = pygame.Surface(offset.size, pygame.SRCALPHA)
+        for y in range(offset.height):
+            blend = y / max(1, offset.height - 1)
+            colour = pygame.Color(
+                clamp(int(base_colour.r + (255 - base_colour.r) * (1 - blend * 0.55)), 0, 255),
+                clamp(int(base_colour.g + (245 - base_colour.g) * (1 - blend * 0.55)), 0, 255),
+                clamp(int(base_colour.b + (255 - base_colour.b) * 0.4 * (1 - blend)), 0, 255),
+                clamp(int(190 - blend * 90), 70, 220),
+            )
+            pygame.draw.line(gradient, colour, (0, y), (offset.width, y))
+        pillar.blit(gradient, (0, 0), special_flags=pygame.BLEND_RGBA_ADD)
+        highlight = pygame.Rect(
+            body_rect.left + body_rect.width // 4,
+            body_rect.top + body_rect.height // 5,
+            body_rect.width // 2,
+            body_rect.height // 2,
+        )
+        pygame.draw.ellipse(pillar, pygame.Color(255, 255, 255, 110), highlight)
+        surface.blit(pillar, offset.topleft)
+        shadow_surface = pygame.Surface((offset.width + 30, max(18, offset.height // 3)), pygame.SRCALPHA)
+        pygame.draw.ellipse(shadow_surface, pygame.Color(0, 0, 0, 120), shadow_surface.get_rect())
+        shadow_rect = shadow_surface.get_rect(center=(offset.centerx, offset.bottom + shadow_surface.get_height() // 2))
+        surface.blit(shadow_surface, shadow_rect)
+
 
 @dataclass
 class MovingPlatform(Platform):
@@ -242,6 +373,8 @@ class MovingPlatform(Platform):
 
     def __post_init__(self) -> None:
         self._float_pos = pygame.Vector2(self.rect.topleft)
+        self.base_plane_y = self.rect.y
+        self.three_d_depth = 0.0
         if self.bounds_x == (0, 0):
             self.bounds_x = (self.rect.left, self.rect.left)
         if self.bounds_y == (0, 0):
@@ -301,6 +434,7 @@ def clone_platform(source: Platform) -> Platform:
         "colour": pygame.Color(source.colour),
         "is_bouncy": source.is_bouncy,
         "bounce_velocity": source.bounce_velocity,
+        "style": source.style,
     }
     if isinstance(source, MovingPlatform):
         clone = MovingPlatform(
@@ -452,6 +586,13 @@ class Player:
     sword_cooldown: float = 0.0
     sword_charges: int = 0
     shield_charges: int = 0
+    three_d_mode: bool = False
+    three_d_bounds: pygame.Rect | None = None
+    three_d_depth: float = 0.0
+    three_d_depth_bounds: Tuple[float, float] = (-120.0, 120.0)
+    three_d_obstacles: List[pygame.Rect] = field(default_factory=list)
+    depth_vel: float = 0.0
+    base_plane_y: int = 0
     _float_pos: pygame.Vector2 = field(init=False)
     _pending_bounce: Platform | None = field(default=None, init=False)
     _pending_double_jump_effect: bool = field(default=False, init=False)
@@ -463,8 +604,49 @@ class Player:
     def set_position(self, pos: Tuple[int, int]) -> None:
         self.rect.topleft = (int(pos[0]), int(pos[1]))
         self._float_pos.xy = (float(self.rect.x), float(self.rect.y))
+        if self.three_d_mode:
+            self.base_plane_y = self.rect.y
+            self.three_d_depth = 0.0
+
+    def enable_three_d_mode(
+        self,
+        bounds: pygame.Rect,
+        *,
+        base_y: int,
+        depth_bounds: Tuple[float, float],
+        obstacles: Sequence[pygame.Rect] | None = None,
+    ) -> None:
+        self.three_d_mode = True
+        self.three_d_bounds = bounds.copy()
+        self.base_plane_y = base_y
+        low, high = depth_bounds
+        if low > high:
+            low, high = high, low
+        self.three_d_depth_bounds = (float(low), float(high))
+        self.three_d_depth = 0.0
+        self.depth_vel = 0.0
+        self.vel.xy = (0.0, 0.0)
+        self._float_pos.xy = (float(self.rect.x), float(self.rect.y))
+        self.rect.y = self.base_plane_y
+        self._float_pos.y = float(self.rect.y)
+        self.on_ground = True
+        self.ground_platform = None
+        obs: List[pygame.Rect] = []
+        if obstacles:
+            for obstacle in obstacles:
+                obs.append(obstacle.copy())
+        self.three_d_obstacles = obs
+
+    def disable_three_d_mode(self) -> None:
+        self.three_d_mode = False
+        self.three_d_bounds = None
+        self.three_d_depth = 0.0
+        self.depth_vel = 0.0
+        self.three_d_obstacles.clear()
 
     def jump(self) -> bool:
+        if self.three_d_mode:
+            return False
         if self.can_ground_jump():
             self.start_ground_jump()
             return True
@@ -499,7 +681,20 @@ class Player:
     def apply_gravity(self, frame_scale: float) -> None:
         self.vel.y += GRAVITY * frame_scale
 
-    def move(self, direction: float, dt: float) -> None:
+    def move(self, direction: float, dt: float, depth_direction: float = 0.0) -> None:
+        if self.three_d_mode:
+            frame_scale = clamp(dt * FPS, 0.0, 2.0)
+            target_x = direction * PLAYER_SPEED * 1.05
+            self.vel.x = lerp(self.vel.x, target_x, clamp(frame_scale * 0.5, 0.0, 1.0))
+            if abs(self.vel.x) < 0.05:
+                self.vel.x = 0.0
+            if direction:
+                self.facing = 1 if direction > 0 else -1
+            target_depth = depth_direction * PLAYER_SPEED * 0.9
+            self.depth_vel = lerp(self.depth_vel, target_depth, clamp(frame_scale * 0.5, 0.0, 1.0))
+            if abs(self.depth_vel) < 0.05:
+                self.depth_vel = 0.0
+            return
         frame_scale = clamp(dt * FPS, 0.0, 1.5)
         target = direction * PLAYER_SPEED
         self.vel.x = lerp(self.vel.x, target, clamp(frame_scale * 0.35, 0.0, 1.0))
@@ -529,6 +724,8 @@ class Player:
 
     def update(self, platforms: Sequence[Platform], dt: float) -> List[Particle]:
         particles: List[Particle] = []
+        if self.three_d_mode:
+            return self._update_three_d(dt)
         if self.ground_platform and isinstance(self.ground_platform, MovingPlatform):
             motion = self.ground_platform.last_move
             if motion.x or motion.y:
@@ -570,6 +767,52 @@ class Player:
         if self.sword_cooldown <= 0:
             self.sword_ready = self.sword_charges > 0
         return particles
+
+    def _update_three_d(self, dt: float) -> List[Particle]:
+        frame_scale = clamp(dt * FPS, 0.0, 2.0)
+        self.animation_time += dt
+        if self.invincible_timer > 0:
+            self.invincible_timer = max(0.0, self.invincible_timer - dt)
+        if self.sword_cooldown > 0:
+            self.sword_cooldown = max(0.0, self.sword_cooldown - dt)
+        if self.sword_cooldown <= 0:
+            self.sword_ready = self.sword_charges > 0
+
+        proposed_x = self._float_pos.x + self.vel.x * frame_scale
+        if self.three_d_bounds:
+            min_x = self.three_d_bounds.left
+            max_x = max(min_x, self.three_d_bounds.right - self.rect.width)
+            proposed_x = clamp(proposed_x, min_x, max_x)
+        trial_rect = self.rect.copy()
+        trial_rect.x = int(round(proposed_x))
+        if self._collides_three_d(trial_rect):
+            self.vel.x = 0.0
+        else:
+            self._float_pos.x = proposed_x
+            self.rect.x = trial_rect.x
+
+        proposed_depth = self.three_d_depth + self.depth_vel * frame_scale
+        min_depth, max_depth = self.three_d_depth_bounds
+        if min_depth > max_depth:
+            min_depth, max_depth = max_depth, min_depth
+        proposed_depth = clamp(proposed_depth, min_depth, max_depth)
+        trial_rect.y = int(round(self.base_plane_y + proposed_depth))
+        if self._collides_three_d(trial_rect):
+            self.depth_vel = 0.0
+        else:
+            self.three_d_depth = proposed_depth
+            self.rect.y = trial_rect.y
+            self._float_pos.y = float(self.rect.y)
+
+        self.on_ground = True
+        self.ground_platform = None
+        return []
+
+    def _collides_three_d(self, rect: pygame.Rect) -> bool:
+        for obstacle in self.three_d_obstacles:
+            if rect.colliderect(obstacle):
+                return True
+        return False
 
     def _resolve_initial_overlap(self, platforms: Sequence[Platform]) -> None:
         attempts = 0
@@ -835,7 +1078,24 @@ class Player:
         offset = self.rect.move(-camera_x, 0)
         flicker = self.invincible_timer > 0 and int(self.invincible_timer * 30) % 2 == 0
 
+        if self.three_d_mode:
+            shadow_surface = pygame.Surface((self.rect.width + 30, 18), pygame.SRCALPHA)
+            pygame.draw.ellipse(shadow_surface, pygame.Color(0, 0, 0, 110), shadow_surface.get_rect())
+            shadow_rect = shadow_surface.get_rect(center=(offset.centerx, offset.bottom - 4))
+            surface.blit(shadow_surface, shadow_rect)
+
         suit_base = pygame.Rect(offset.left + 8, offset.top + 4, offset.width - 16, offset.height - 10)
+        if self.three_d_mode:
+            min_depth, max_depth = self.three_d_depth_bounds
+            depth_span = max(1.0, max_depth - min_depth)
+            depth_factor = (self.three_d_depth - min_depth) / depth_span
+            size_scale = 0.95 + 0.18 * (1.0 - depth_factor)
+            height_scale = 0.9 + 0.15 * (1.0 - depth_factor)
+            centre = suit_base.center
+            suit_base.width = max(20, int(suit_base.width * size_scale))
+            suit_base.height = max(26, int(suit_base.height * height_scale))
+            suit_base.center = centre
+
         run_phase = math.sin(self.animation_time * 12.0) * min(1.0, abs(self.vel.x) / (PLAYER_SPEED + 1e-3))
         bob = -run_phase * 3.0 if self.on_ground and abs(self.vel.x) > 0.4 else 0.0
         if not self.on_ground:
@@ -1386,21 +1646,45 @@ class ShieldPowerUp:
 class GoalFlag:
     rect: pygame.Rect
     flutter: float = 0.0
+    style: str = "flag"
 
     def update(self, dt: float) -> None:
         self.flutter = (self.flutter + dt * 5.0) % math.tau
 
     def draw(self, surface: pygame.Surface, camera_x: float) -> None:
         offset = self.rect.move(-camera_x, 0)
-        pygame.draw.rect(surface, WHITE,
-                         (offset.x, offset.y - self.rect.height, 6, self.rect.height))
-        flag_wave = int(16 * math.sin(self.flutter))
-        flag_points = [
-            (offset.x + 6, offset.y - self.rect.height + 10),
-            (offset.x + 6 + 46 + flag_wave, offset.y - self.rect.height + 24),
-            (offset.x + 6, offset.y - self.rect.height + 38),
-        ]
-        pygame.draw.polygon(surface, CYAN, flag_points)
+        if self.style == "portal":
+            centre = (offset.centerx, offset.bottom - self.rect.height // 2)
+            radius = max(28, self.rect.height // 2 + 4)
+            swirl = 6 + int(4 * math.sin(self.flutter * 2.4))
+            ring_surface = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
+            pygame.draw.circle(ring_surface, (90, 255, 240, 160), (radius, radius), radius, 3)
+            pygame.draw.circle(ring_surface, (255, 255, 255, 90), (radius, radius), max(6, radius // 2 + swirl), 2)
+            pygame.draw.circle(ring_surface, (120, 120, 255, 100), (radius, radius), radius // 3, 0)
+            surface.blit(ring_surface, (centre[0] - radius, centre[1] - radius))
+            orbit_radius = radius + 16
+            orbit_angle = self.flutter * 1.8
+            orb_pos = (
+                centre[0] + int(math.cos(orbit_angle) * orbit_radius),
+                centre[1] + int(math.sin(orbit_angle) * (orbit_radius * 0.4)),
+            )
+            pygame.draw.circle(surface, RIFT_GLOW, orb_pos, 6)
+            tail_start = (centre[0], offset.bottom)
+            tail_end = (centre[0], offset.bottom + 60)
+            pygame.draw.line(surface, pygame.Color(150, 255, 255, 140), tail_start, tail_end, 4)
+        else:
+            pygame.draw.rect(
+                surface,
+                WHITE,
+                (offset.x, offset.y - self.rect.height, 6, self.rect.height),
+            )
+            flag_wave = int(16 * math.sin(self.flutter))
+            flag_points = [
+                (offset.x + 6, offset.y - self.rect.height + 10),
+                (offset.x + 6 + 46 + flag_wave, offset.y - self.rect.height + 24),
+                (offset.x + 6, offset.y - self.rect.height + 38),
+            ]
+            pygame.draw.polygon(surface, CYAN, flag_points)
 
 
 def generate_level(stage: int, rng: random.Random, theme_index: int) -> dict:
@@ -1757,7 +2041,7 @@ def generate_level(stage: int, rng: random.Random, theme_index: int) -> dict:
 
 def generate_boss_level(stage: int, rng: random.Random, theme_index: int) -> dict:
     level_length = 1280
-    base_y = 520
+    base_y = SCREEN_HEIGHT - rng.randint(120, 150)
     platform_height = 44
 
     def make_platform(rect: pygame.Rect, *, bouncy: bool = False, strength: float = 1.0) -> Platform:
@@ -1768,38 +2052,62 @@ def generate_boss_level(stage: int, rng: random.Random, theme_index: int) -> dic
             platform.colour = pygame.Color(BOUNCY_CORAL)
         return platform
 
-    platforms: List[Platform] = [
-        make_platform(pygame.Rect(0, base_y, 320, platform_height)),
-        make_platform(pygame.Rect(360, base_y, 320, platform_height)),
-        make_platform(pygame.Rect(720, base_y, 320, platform_height)),
-    ]
+    platforms: List[Platform] = []
+    cursor_x = 0
+    ground_sections = 3 + rng.randint(0, 1)
+    for _ in range(ground_sections):
+        width = rng.randint(260, 340)
+        rect = pygame.Rect(cursor_x, base_y, width, platform_height)
+        platforms.append(make_platform(rect))
+        cursor_x += width + rng.randint(60, 100)
+    level_length = max(level_length, cursor_x + 300)
 
-    bounce_strength = 1.12
-    bounce_pad_left = make_platform(pygame.Rect(90, base_y - 70, 120, 30), bouncy=True, strength=bounce_strength)
-    bounce_pad_right = make_platform(pygame.Rect(820, base_y - 70, 120, 30), bouncy=True, strength=bounce_strength + 0.05)
-    elevated = make_platform(pygame.Rect(480, base_y - 150, 160, 28))
+    bounce_strength = 1.08 + rng.random() * 0.12
+    left_pad_width = rng.randint(110, 150)
+    right_pad_width = rng.randint(120, 160)
+    left_pad_height = rng.randint(60, 90)
+    right_pad_height = rng.randint(60, 90)
+    left_anchor = platforms[0].rect.left + rng.randint(40, 140)
+    right_anchor = platforms[-1].rect.right - rng.randint(160, 220)
+    bounce_pad_left = make_platform(
+        pygame.Rect(left_anchor, base_y - left_pad_height, left_pad_width, 30), bouncy=True, strength=bounce_strength
+    )
+    bounce_pad_right = make_platform(
+        pygame.Rect(right_anchor, base_y - right_pad_height - rng.randint(-10, 20), right_pad_width, 30),
+        bouncy=True,
+        strength=bounce_strength + 0.08,
+    )
+    elevated_width = rng.randint(150, 220)
+    elevated_height = rng.randint(140, 210)
+    elevated_offset = rng.randint(int(level_length * 0.25), int(level_length * 0.55))
+    elevated = make_platform(pygame.Rect(elevated_offset, base_y - elevated_height, elevated_width, 28))
 
     platforms.extend([bounce_pad_left, bounce_pad_right, elevated])
 
     moving_platforms: List[MovingPlatform] = []
 
     vertical_platform = MovingPlatform(
-        pygame.Rect(560, base_y - 220, 130, 26),
-        bounds_x=(560, 560 + 130),
-        bounds_y=(base_y - 300, base_y - 80),
-        speed_x=0.0,
-        speed_y=2.3,
+        pygame.Rect(elevated.rect.centerx - 60, base_y - rng.randint(240, 280), 150, 26),
+        bounds_x=(elevated.rect.centerx - 60, elevated.rect.centerx + 100),
+        bounds_y=(base_y - 320, base_y - 120),
+        speed_x=1.2,
+        speed_y=2.4,
         is_bouncy=True,
-        bounce_velocity=BOUNCE_VELOCITY * 1.1,
+        bounce_velocity=BOUNCE_VELOCITY * (1.05 + rng.random() * 0.1),
     )
     vertical_platform.colour = pygame.Color(200, 150, 255)
     moving_platforms.append(vertical_platform)
 
     horizontal_platform = MovingPlatform(
-        pygame.Rect(280, base_y - 210, 140, 26),
-        bounds_x=(160, level_length - 260),
-        bounds_y=(base_y - 210, base_y - 180),
-        speed_x=2.6,
+        pygame.Rect(
+            bounce_pad_left.rect.right + rng.randint(80, 140),
+            base_y - rng.randint(180, 220),
+            150,
+            28,
+        ),
+        bounds_x=(bounce_pad_left.rect.right, level_length - 280),
+        bounds_y=(base_y - 220, base_y - 180),
+        speed_x=2.4 + rng.random() * 0.8,
         speed_y=0.0,
         is_bouncy=False,
     )
@@ -1807,58 +2115,89 @@ def generate_boss_level(stage: int, rng: random.Random, theme_index: int) -> dic
     moving_platforms.append(horizontal_platform)
 
     aerial_pad = MovingPlatform(
-        pygame.Rect(900, base_y - 260, 120, 24),
-        bounds_x=(780, level_length - 180),
-        bounds_y=(base_y - 320, base_y - 240),
-        speed_x=2.1,
+        pygame.Rect(
+            level_length - 420,
+            base_y - rng.randint(260, 320),
+            130,
+            24,
+        ),
+        bounds_x=(level_length - 540, level_length - 160),
+        bounds_y=(base_y - 340, base_y - 240),
+        speed_x=1.8 + rng.random() * 0.7,
         speed_y=0.0,
         is_bouncy=True,
-        bounce_velocity=BOUNCE_VELOCITY * 1.05,
+        bounce_velocity=BOUNCE_VELOCITY * (1.02 + rng.random() * 0.08),
     )
     aerial_pad.colour = pygame.Color(230, 170, 220)
     moving_platforms.append(aerial_pad)
 
-    spawn_point = (platforms[0].rect.left + 48, platforms[0].rect.top - 60)
+    spawn_point = (platforms[0].rect.left + rng.randint(36, 68), platforms[0].rect.top - 60)
 
     double_jump_orbs = [
-        DoubleJumpPowerUp(pygame.Rect(360, base_y - 220, 36, 36)),
-        DoubleJumpPowerUp(pygame.Rect(980, base_y - 320, 36, 36)),
+        DoubleJumpPowerUp(pygame.Rect(bounce_pad_left.rect.centerx - 18, bounce_pad_left.rect.top - 110, 36, 36)),
+        DoubleJumpPowerUp(pygame.Rect(aerial_pad.rect.centerx - 18, aerial_pad.rect.top - 90, 36, 36)),
     ]
 
     sword_tokens = [
-        SwordPowerUp(pygame.Rect(640, base_y - 260, 32, 32)),
-        SwordPowerUp(pygame.Rect(220, base_y - 200, 32, 32)),
+        SwordPowerUp(pygame.Rect(vertical_platform.rect.centerx - 16, vertical_platform.rect.top - 110, 32, 32)),
+        SwordPowerUp(pygame.Rect(elevated.rect.centerx - 16, elevated.rect.top - 110, 32, 32)),
     ]
 
     shield_tokens = [
-        ShieldPowerUp(pygame.Rect(500, base_y - 220, 38, 38)),
-        ShieldPowerUp(pygame.Rect(1030, base_y - 280, 38, 38)),
+        ShieldPowerUp(pygame.Rect(horizontal_platform.rect.centerx - 18, horizontal_platform.rect.top - 100, 38, 38)),
+        ShieldPowerUp(pygame.Rect(bounce_pad_right.rect.centerx - 18, bounce_pad_right.rect.top - 100, 38, 38)),
     ]
 
     coins: List[Coin] = []
-    for anchor in (bounce_pad_left, bounce_pad_right, elevated):
-        coin_rect = pygame.Rect(anchor.rect.centerx - 14, anchor.rect.top - 50, 28, 28)
+    for anchor in (bounce_pad_left, bounce_pad_right, elevated, horizontal_platform):
+        coin_rect = pygame.Rect(anchor.rect.centerx - 16, anchor.rect.top - 56, 32, 32)
         coins.append(Coin(coin_rect))
+    for idx, ground in enumerate(platforms[:-3]):
+        if idx % 2 == 0:
+            coin_rect = pygame.Rect(ground.rect.centerx - 16, ground.rect.top - 56, 32, 32)
+            coins.append(Coin(coin_rect))
 
-    goal = GoalFlag(pygame.Rect(level_length - 120, base_y, 32, 80))
-    kill_plane = SCREEN_HEIGHT + 220
+    enemies: List[Enemy] = []
+    for section in platforms[:ground_sections]:
+        patrol_left = section.rect.left + 24
+        patrol_right = section.rect.right - 24
+        if patrol_right - patrol_left < 80:
+            continue
+        if rng.random() < 0.6:
+            enemy_rect = pygame.Rect(
+                rng.randint(patrol_left + 12, patrol_right - 48),
+                section.rect.top - 44,
+                36,
+                40,
+            )
+            enemies.append(Enemy(enemy_rect, (patrol_left, patrol_right), speed=2.8 + rng.random() * 1.3))
+
+    shooters: List[ShooterEnemy] = []
+    if rng.random() < 0.75:
+        perch = aerial_pad if rng.random() < 0.55 else elevated
+        shooter_rect = pygame.Rect(perch.rect.centerx - 22, perch.rect.top - 48, 40, 44)
+        facing = -1 if shooter_rect.centerx > level_length / 2 else 1
+        shooters.append(ShooterEnemy(shooter_rect, facing=facing, fire_rate=1.8 + rng.random() * 0.5))
+
+    goal = GoalFlag(pygame.Rect(level_length - 140, base_y - 120, 60, 140), flutter=0.8)
+    kill_plane = SCREEN_HEIGHT + 240
 
     anchors = [
-        pygame.Vector2(600, base_y - 260),
-        pygame.Vector2(860, base_y - 280),
-        pygame.Vector2(380, base_y - 250),
-        pygame.Vector2(620, base_y - 340),
+        pygame.Vector2(rng.randint(int(level_length * 0.25), int(level_length * 0.4)), base_y - rng.randint(220, 300)),
+        pygame.Vector2(rng.randint(int(level_length * 0.45), int(level_length * 0.65)), base_y - rng.randint(240, 320)),
+        pygame.Vector2(rng.randint(int(level_length * 0.3), int(level_length * 0.55)), base_y - rng.randint(300, 360)),
+        pygame.Vector2(rng.randint(int(level_length * 0.6), int(level_length * 0.8)), base_y - rng.randint(220, 320)),
     ]
 
     boss_rect = pygame.Rect(0, 0, 96, 96)
-    boss_rect.center = (620, base_y - 280)
+    boss_rect.center = (int(level_length * 0.58), base_y - 260)
     boss = Boss(boss_rect, anchors, health=6, speed=200.0, attack_cooldown=2.2)
 
     return {
         "platforms": platforms,
         "moving_platforms": moving_platforms,
-        "enemies": [],
-        "shooters": [],
+        "enemies": enemies,
+        "shooters": shooters,
         "double_jump": double_jump_orbs,
         "swords": sword_tokens,
         "shields": shield_tokens,
@@ -1887,6 +2226,151 @@ def generate_level_pack(count: int, seed: int | None = None) -> List[dict]:
         else:
             pack.append(generate_level(stage, rng, theme_index))
     return pack
+
+
+def generate_secret_3d_level(seed: int | None = None) -> dict:
+    rng = random.Random(seed)
+    arena_width = 1120
+    arena_height = 360
+    floor_top = max(70, SCREEN_HEIGHT - arena_height - 120)
+    floor_rect = pygame.Rect(80, floor_top, arena_width, arena_height)
+    shell_rect = floor_rect.inflate(140, 120)
+
+    platforms: List[Platform] = [
+        Platform(shell_rect.copy(), colour=pygame.Color(26, 40, 96), style="arena"),
+        Platform(floor_rect.copy(), colour=pygame.Color(74, 146, 228), style="arena"),
+    ]
+
+    stripe_height = 26
+    for lane in range(3):
+        lane_y = floor_rect.top + (lane + 1) * floor_rect.height // 4 - stripe_height // 2
+        stripe_rect = pygame.Rect(floor_rect.left + 60, lane_y, floor_rect.width - 120, stripe_height)
+        platforms.append(Platform(stripe_rect, colour=pygame.Color(110, 200, 255), style="arena"))
+
+    obstacles: List[pygame.Rect] = []
+    corridor_width = floor_rect.width // 3
+    for column in range(3):
+        obs_width = rng.randint(140, 210)
+        obs_height = rng.randint(90, 140)
+        left_min = floor_rect.left + column * corridor_width + 80
+        left_max = floor_rect.left + (column + 1) * corridor_width - obs_width - 80
+        if left_min > left_max:
+            left_min, left_max = floor_rect.left + 60, floor_rect.right - obs_width - 60
+        obstacle_left = clamp(rng.randint(left_min, left_max), floor_rect.left + 60, floor_rect.right - obs_width - 60)
+        obstacle_top = clamp(
+            rng.randint(floor_rect.top + 60, floor_rect.bottom - obs_height - 80),
+            floor_rect.top + 50,
+            floor_rect.bottom - obs_height - 60,
+        )
+        obstacle = pygame.Rect(obstacle_left, obstacle_top, obs_width, obs_height)
+        obstacles.append(obstacle)
+        platforms.append(Platform(obstacle.copy(), colour=pygame.Color(160, 110, 255), style="pillar"))
+
+    moving_platforms: List[MovingPlatform] = []
+
+    coins: List[Coin] = []
+    def fits(rect: pygame.Rect) -> bool:
+        if not floor_rect.inflate(-80, -80).contains(rect):
+            return False
+        for obstacle in obstacles:
+            if rect.colliderect(obstacle.inflate(40, 40)):
+                return False
+        for existing in coins:
+            if rect.colliderect(existing.rect.inflate(24, 24)):
+                return False
+        return True
+
+    attempts = 0
+    desired_coins = 14
+    while len(coins) < desired_coins and attempts < 120:
+        attempts += 1
+        coin_rect = pygame.Rect(0, 0, 32, 32)
+        coin_rect.center = (
+            rng.randint(floor_rect.left + 80, floor_rect.right - 80),
+            rng.randint(floor_rect.top + 70, floor_rect.bottom - 70),
+        )
+        coin_rect.x -= coin_rect.width // 2
+        coin_rect.y -= coin_rect.height // 2
+        if fits(coin_rect):
+            coins.append(Coin(coin_rect))
+
+    pickup_padding = 72
+    def place_pickup(size: Tuple[int, int]) -> pygame.Rect:
+        for _ in range(80):
+            rect = pygame.Rect(0, 0, *size)
+            rect.center = (
+                rng.randint(floor_rect.left + pickup_padding, floor_rect.right - pickup_padding),
+                rng.randint(floor_rect.top + pickup_padding, floor_rect.bottom - pickup_padding),
+            )
+            if fits(rect.inflate(20, 20)):
+                return rect
+        rect = pygame.Rect(0, 0, *size)
+        rect.center = floor_rect.center
+        return rect
+
+    double_jump_orbs = [
+        DoubleJumpPowerUp(place_pickup((36, 36))),
+        DoubleJumpPowerUp(place_pickup((36, 36))),
+    ]
+    sword_tokens = [
+        SwordPowerUp(place_pickup((32, 32))),
+    ]
+    shield_tokens = [
+        ShieldPowerUp(place_pickup((40, 40))),
+    ]
+
+    enemies: List[Enemy] = []
+    shooters: List[ShooterEnemy] = []
+
+    goal_rect = pygame.Rect(floor_rect.centerx - 40, floor_rect.top - 120, 80, 140)
+    goal = GoalFlag(goal_rect, flutter=0.6, style="portal")
+
+    horizontal_margin = 70
+    vertical_margin = 60
+    arena_bounds = pygame.Rect(
+        floor_rect.left + horizontal_margin,
+        floor_rect.top + vertical_margin,
+        floor_rect.width - 2 * horizontal_margin,
+        floor_rect.height - 2 * vertical_margin,
+    )
+
+    player_width, player_height = 44, 60
+    spawn_point = (
+        arena_bounds.centerx - player_width // 2,
+        arena_bounds.centery - player_height // 2,
+    )
+
+    base_y = spawn_point[1]
+    depth_bounds = (
+        arena_bounds.top - base_y,
+        arena_bounds.bottom - player_height - base_y,
+    )
+
+    kill_plane = SCREEN_HEIGHT + 800
+    theme_index = len(BACKGROUND_THEMES) - 1
+    level_length = shell_rect.right + 200
+
+    return {
+        "platforms": platforms,
+        "moving_platforms": moving_platforms,
+        "enemies": enemies,
+        "shooters": shooters,
+        "double_jump": double_jump_orbs,
+        "swords": sword_tokens,
+        "shields": shield_tokens,
+        "coins": coins,
+        "goal": goal,
+        "goal_style": "portal",
+        "spawn_point": spawn_point,
+        "kill_plane": kill_plane,
+        "length": level_length,
+        "theme": theme_index,
+        "secret_3d": True,
+        "arena_bounds": arena_bounds,
+        "depth_bounds": depth_bounds,
+        "arena_obstacles": obstacles,
+        "name": "Prismatic Rift",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1973,6 +2457,7 @@ class GameState:
     PAUSED = "paused"
     GAME_OVER = "game_over"
     VICTORY = "victory"
+    SECRET_PROMPT = "secret_prompt"
 
 
 class LevelManager:
@@ -2002,6 +2487,11 @@ class LevelManager:
         self.sword_spawn_points: List[pygame.Rect] = []
         self.sword_spawn_timer: float = 0.0
         self.sword_spawn_index: int = 0
+        self.secret_3d: bool = False
+        self.secret_title: str = ""
+        self.secret_3d_bounds: pygame.Rect | None = None
+        self.secret_depth_bounds: Tuple[float, float] = (-120.0, 120.0)
+        self.secret_3d_obstacles: List[pygame.Rect] = []
         self.generate_new_levels()
 
     def generate_new_levels(self, seed: int | None = None) -> None:
@@ -2049,11 +2539,26 @@ class LevelManager:
             coin.pulse = c.pulse
             self.coins.append(coin)
         goal = data["goal"]
-        self.goal = GoalFlag(goal.rect.copy())
+        goal_style = data.get("goal_style", getattr(goal, "style", "flag"))
+        self.goal = GoalFlag(goal.rect.copy(), flutter=getattr(goal, "flutter", 0.0), style=goal_style)
         self.spawn_point = data["spawn_point"]
         self.kill_plane = data["kill_plane"]
         self.level_length = data["length"]
         self.theme_index = data.get("theme", 0)
+        self.secret_3d = data.get("secret_3d", False)
+        self.secret_title = data.get("name", "")
+        bounds_rect = data.get("arena_bounds")
+        self.secret_3d_bounds = bounds_rect.copy() if isinstance(bounds_rect, pygame.Rect) else None
+        depth_bounds = data.get("depth_bounds")
+        if depth_bounds:
+            low, high = depth_bounds
+            if low > high:
+                low, high = high, low
+            self.secret_depth_bounds = (float(low), float(high))
+        else:
+            self.secret_depth_bounds = (-120.0, 120.0)
+        obstacle_source = data.get("arena_obstacles", [])
+        self.secret_3d_obstacles = [obstacle.copy() for obstacle in obstacle_source if isinstance(obstacle, pygame.Rect)]
         self.shield_tokens = []
         for shield in data.get("shields", []):
             clone = ShieldPowerUp(shield.rect.copy())
@@ -2151,6 +2656,10 @@ class LevelManager:
             return True
         return False
 
+    def append_level(self, blueprint: dict) -> None:
+        self.level_blueprints.append(blueprint)
+        self.total_levels = len(self.level_blueprints)
+
     def is_boss_stage(self) -> bool:
         return self._is_boss_level
 
@@ -2172,14 +2681,35 @@ class LevelManager:
 
 class MarioLikeGame:
     def __init__(self) -> None:
-        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+        self.available_resolutions = AVAILABLE_RESOLUTIONS
+        default_pair = (SCREEN_WIDTH, SCREEN_HEIGHT)
+        try:
+            self.resolution_index = self.available_resolutions.index(default_pair)
+        except ValueError:
+            self.resolution_index = 0
+        self.fullscreen = False
+        self.screen = pygame.display.set_mode(default_pair)
         pygame.display.set_caption("Neon Night Run")
         self.clock = pygame.time.Clock()
-        self.sky = ParallaxSky(SCREEN_WIDTH, SCREEN_HEIGHT)
-        self.camera = Camera()
         self.state = GameState.MENU
         self.hard_mode = False
+        self.max_lives = 3
         self.levels = LevelManager()
+        self.base_stage_count = self.levels.stage_count
+        self._apply_video_settings(reset_world=False)
+        self.secret_choice_labels = (
+            "Celebrate the victory",
+            "Enter the secret 3D level",
+        )
+        self._prepare_new_run()
+
+    # ---------------------------- State transitions ---------------------
+    def start_game(self) -> None:
+        self.levels.generate_new_levels()
+        self._prepare_new_run()
+        self.state = GameState.PLAYING
+
+    def _prepare_new_run(self) -> None:
         spawn_x, spawn_y = self.levels.spawn_point
         self.player = Player(pygame.Rect(spawn_x, spawn_y, 44, 60))
         self.particles: List[Particle] = []
@@ -2189,36 +2719,162 @@ class MarioLikeGame:
         self.score = 0
         self.combo_timer = 0.0
         self.time_elapsed = 0.0
-        self.max_lives = 3
         self.lives = self.max_lives
         self.jump_was_pressed = False
         self.attack_was_pressed = False
         self.nova_was_pressed = False
         self.combo_nova_ready = False
         self.combo_nova_cooldown = 0.0
+        self.camera.x = 0
         self.sky.set_theme(self.levels.theme_index)
+        self._apply_player_dimension_mode()
+        self.secret_level_added = False
+        self.secret_prompt_active = False
+        self.secret_prompt_ready = False
+        self.secret_cutscene_timer = 0.0
+        self.secret_choice_index = 1
+        self.secret_portal_phase = 0.0
+        self.secret_portal_pos: Optional[pygame.Vector2] = None
+        self.rift_timer = 0.0
 
-    # ---------------------------- State transitions ---------------------
-    def start_game(self) -> None:
-        self.state = GameState.PLAYING
-        self.levels.generate_new_levels()
-        spawn_x, spawn_y = self.levels.spawn_point
-        self.player = Player(pygame.Rect(spawn_x, spawn_y, 44, 60))
-        self.particles.clear()
+    def _apply_player_dimension_mode(self) -> None:
+        if not hasattr(self, "player"):
+            return
+        if self.levels.secret_3d:
+            bounds = self.levels.secret_3d_bounds
+            if bounds is None:
+                bounds = pygame.Rect(
+                    self.levels.spawn_point[0] - 120,
+                    self.levels.spawn_point[1] - 80,
+                    max(self.player.rect.width + 240, 320),
+                    max(self.player.rect.height + 220, 260),
+                )
+            depth_bounds = self.levels.secret_depth_bounds or (-120.0, 120.0)
+            obstacles = self.levels.secret_3d_obstacles
+            self.player.enable_three_d_mode(
+                bounds,
+                base_y=self.levels.spawn_point[1],
+                depth_bounds=depth_bounds,
+                obstacles=obstacles,
+            )
+        elif self.player.three_d_mode:
+            self.player.disable_three_d_mode()
+            self.player.set_position(self.levels.spawn_point)
+
+    def _apply_video_settings(self, *, reset_world: bool = True) -> None:
+        global SCREEN_WIDTH, SCREEN_HEIGHT
+        if not self.available_resolutions:
+            return
+        SCREEN_WIDTH, SCREEN_HEIGHT = self.available_resolutions[self.resolution_index]
+        flags = pygame.SCALED
+        if self.fullscreen:
+            flags |= pygame.FULLSCREEN
+        else:
+            flags |= pygame.RESIZABLE
+        try:
+            self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), flags)
+        except pygame.error:
+            fallback_flags = pygame.FULLSCREEN if self.fullscreen else 0
+            try:
+                self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), fallback_flags)
+            except pygame.error:
+                fallback_flags = 0
+                self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), fallback_flags)
+            if fallback_flags != flags:
+                self.fullscreen = bool(fallback_flags & pygame.FULLSCREEN)
+                self.resolution_index = max(
+                    0,
+                    min(self.resolution_index, len(self.available_resolutions) - 1),
+                )
+        pygame.display.set_caption("Neon Night Run")
+        self.sky = ParallaxSky(SCREEN_WIDTH, SCREEN_HEIGHT)
+        self.camera = Camera()
+        if reset_world:
+            stage_count = self.levels.stage_count if hasattr(self, "levels") else 3
+            self.levels = LevelManager(stage_count=stage_count)
+            self._prepare_new_run()
+            self.state = GameState.MENU
+        else:
+            if hasattr(self, "levels"):
+                self.sky.set_theme(self.levels.theme_index)
+
+    def _change_resolution(self, step: int) -> None:
+        if not self.available_resolutions:
+            return
+        total = len(self.available_resolutions)
+        if total <= 1:
+            return
+        new_index = (self.resolution_index + step) % total
+        if new_index == self.resolution_index:
+            return
+        self.resolution_index = new_index
+        self._apply_video_settings()
+
+    def _toggle_fullscreen(self) -> None:
+        self.fullscreen = not self.fullscreen
+        self._apply_video_settings(reset_world=False)
+
+    def _start_secret_prompt(self, anchor: Tuple[int, int]) -> None:
+        if self.secret_prompt_active:
+            return
+        self.state = GameState.SECRET_PROMPT
+        self.secret_prompt_active = True
+        self.secret_prompt_ready = False
+        self.secret_cutscene_timer = 0.0
+        self.secret_choice_index = 1
+        self.secret_portal_phase = 0.0
+        self.secret_portal_pos = pygame.Vector2(anchor)
+        self.player.vel.xy = (0, 0)
+        self.player.on_ground = True
+        self.jump_was_pressed = False
+        self.attack_was_pressed = False
+        self.nova_was_pressed = False
+        self.particles.extend(self._sparkle_effect(anchor))
         self.projectiles.clear()
         self.slashes.clear()
         self.jump_spheres.clear()
-        self.score = 0
-        self.combo_timer = 0.0
-        self.time_elapsed = 0.0
-        self.lives = self.max_lives
-        self.camera.x = 0
-        self.jump_was_pressed = False
-        self.attack_was_pressed = False
-        self.nova_was_pressed = False
-        self.combo_nova_ready = False
-        self.combo_nova_cooldown = 0.0
-        self.sky.set_theme(self.levels.theme_index)
+
+    def _move_secret_choice(self, delta: int) -> None:
+        if not self.secret_prompt_ready:
+            return
+        options = len(self.secret_choice_labels)
+        if options <= 1:
+            return
+        self.secret_choice_index = (self.secret_choice_index + delta) % options
+
+    def _confirm_secret_choice(self) -> None:
+        if not self.secret_prompt_ready:
+            return
+        if self.secret_choice_index == 0:
+            self._end_secret_prompt()
+            self.victory()
+            return
+        self._begin_secret_level()
+
+    def _begin_secret_level(self) -> None:
+        self._ensure_secret_level_available()
+        portal_pos = (int(self.secret_portal_pos.x), int(self.secret_portal_pos.y)) if self.secret_portal_pos else None
+        if self.levels.advance():
+            self._transition_to_next_level(portal_pos)
+            self.state = GameState.PLAYING
+        else:
+            self.victory()
+        self._end_secret_prompt()
+
+    def _ensure_secret_level_available(self) -> None:
+        if self.secret_level_added:
+            return
+        blueprint = generate_secret_3d_level(random.randrange(1 << 30))
+        self.levels.append_level(blueprint)
+        self.secret_level_added = True
+
+    def _end_secret_prompt(self) -> None:
+        self.secret_prompt_active = False
+        self.secret_prompt_ready = False
+        self.secret_cutscene_timer = 0.0
+        self.secret_portal_phase = 0.0
+        self.secret_choice_index = 1
+        self.secret_portal_pos = None
 
     def pause(self) -> None:
         if self.state == GameState.PLAYING:
@@ -2312,21 +2968,30 @@ class MarioLikeGame:
                 direction -= 1
             if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
                 direction += 1
-            self.player.move(direction, dt)
+            depth_direction = 0.0
+            if self.levels.secret_3d:
+                if keys[pygame.K_UP] or keys[pygame.K_w]:
+                    depth_direction -= 1
+                if keys[pygame.K_DOWN] or keys[pygame.K_s]:
+                    depth_direction += 1
+            self.player.move(direction, dt, depth_direction)
 
-            jump_pressed = keys[pygame.K_UP] or keys[pygame.K_SPACE] or keys[pygame.K_w]
-            if jump_pressed and not self.jump_was_pressed and self.player.jump():
-                self.particles.extend(self.player.emit_jump_particles())
-                self.particles.extend(self.player.emit_wind_gust())
-                if self.player.consume_double_jump_effect():
-                    centre = pygame.Vector2(self.player.rect.centerx, self.player.rect.bottom + 12)
-                    self.jump_spheres.append(
-                        JumpSphereEffect(
-                            centre=centre,
-                            width=self.player.rect.width + 36,
-                            height=28,
+            if self.levels.secret_3d:
+                jump_pressed = False
+            else:
+                jump_pressed = keys[pygame.K_UP] or keys[pygame.K_SPACE] or keys[pygame.K_w]
+                if jump_pressed and not self.jump_was_pressed and self.player.jump():
+                    self.particles.extend(self.player.emit_jump_particles())
+                    self.particles.extend(self.player.emit_wind_gust())
+                    if self.player.consume_double_jump_effect():
+                        centre = pygame.Vector2(self.player.rect.centerx, self.player.rect.bottom + 12)
+                        self.jump_spheres.append(
+                            JumpSphereEffect(
+                                centre=centre,
+                                width=self.player.rect.width + 36,
+                                height=28,
+                            )
                         )
-                    )
             self.jump_was_pressed = jump_pressed
 
             attack_pressed = keys[pygame.K_LSHIFT]
@@ -2356,7 +3021,15 @@ class MarioLikeGame:
 
             boss_centre = self.levels.boss.rect.center if self.levels.boss else None
             if self.levels.consume_boss_transition():
-                if self.levels.advance():
+                last_regular_level = self.levels.level_index == self.levels.total_levels - 1
+                if last_regular_level and not self.secret_level_added:
+                    goal_rect = self.levels.goal.rect if self.levels.goal else self.player.rect
+                    portal_anchor = (
+                        goal_rect.centerx,
+                        goal_rect.centery - goal_rect.height // 4,
+                    )
+                    self._start_secret_prompt(portal_anchor)
+                elif self.levels.advance():
                     self._transition_to_next_level(boss_centre)
                 else:
                     self.victory()
@@ -2368,11 +3041,29 @@ class MarioLikeGame:
             if self.state != GameState.PLAYING:
                 return
 
+            if self.levels.secret_3d:
+                self.rift_timer += dt
+                self.secret_portal_phase = (self.secret_portal_phase + dt * 1.4) % math.tau
+
             self.update_particles(dt)
             self.update_jump_spheres(dt)
             self.camera.update(self.player.rect.centerx, self.levels.level_length)
             self.sky.update(dt)
             self.update_combo_timer(dt)
+        elif self.state == GameState.SECRET_PROMPT:
+            self.secret_cutscene_timer += dt
+            self.secret_portal_phase = (self.secret_portal_phase + dt * 1.3) % math.tau
+            if not self.secret_prompt_ready and self.secret_cutscene_timer >= 1.6:
+                self.secret_prompt_ready = True
+            self.sky.update(dt)
+            self.update_particles(dt)
+            self.update_jump_spheres(dt)
+            if self.projectiles:
+                self.update_projectiles(dt)
+            if self.slashes:
+                self.update_slashes(dt)
+            if self.levels.goal:
+                self.levels.goal.update(dt)
         else:
             self.sky.update(dt)
             self.update_particles(dt)
@@ -2570,6 +3261,14 @@ class MarioLikeGame:
         if goal_ready and player_rect.colliderect(self.levels.goal.rect.inflate(40, 40)):
             bonus = max(0, int(2500 - self.time_elapsed * 30))
             self.add_score(500 + bonus)
+            last_regular_level = self.levels.level_index == self.levels.total_levels - 1
+            if last_regular_level and not self.secret_level_added:
+                portal_anchor = (
+                    self.levels.goal.rect.centerx,
+                    self.levels.goal.rect.centery - self.levels.goal.rect.height // 4,
+                )
+                self._start_secret_prompt(portal_anchor)
+                return
             if self.levels.advance():
                 self._transition_to_next_level(self.levels.goal.rect.midtop)
             else:
@@ -2607,9 +3306,12 @@ class MarioLikeGame:
         self.jump_spheres.clear()
         self.combo_timer = 0.0
         self.player.combo = 0
+        self._apply_player_dimension_mode()
         if sparkle_pos:
             self.particles.extend(self._sparkle_effect(sparkle_pos))
         self.sky.set_theme(self.levels.theme_index)
+        self.rift_timer = 0.0
+        self.secret_portal_phase = 0.0
         self.jump_was_pressed = False
         self.attack_was_pressed = False
         self.nova_was_pressed = False
@@ -2698,6 +3400,15 @@ class MarioLikeGame:
             if distance <= radius:
                 self.projectiles.remove(projectile)
                 self.particles.extend(self._sparkle_effect(projectile.rect.center))
+        boss = self.levels.boss
+        if boss and not boss.defeated:
+            boss_centre = pygame.Vector2(boss.rect.center)
+            effective_radius = radius + max(boss.rect.width, boss.rect.height) * 0.35
+            if boss_centre.distance_to(centre) <= effective_radius:
+                if boss.take_hit():
+                    defeated += 1
+                    self.levels.on_boss_hit()
+                    self.particles.extend(self._sparkle_effect(boss.rect.center))
         if defeated > 0:
             self.add_score(200 * defeated)
         self.particles.extend(self._sparkle_effect((int(centre.x), int(centre.y))))
@@ -2727,6 +3438,9 @@ class MarioLikeGame:
         elif self.state == GameState.PLAYING:
             self._draw_world()
             self._draw_hud()
+        elif self.state == GameState.SECRET_PROMPT:
+            self._draw_world()
+            self._draw_secret_prompt_overlay()
         elif self.state == GameState.PAUSED:
             self._draw_world()
             self._draw_hud()
@@ -2740,6 +3454,8 @@ class MarioLikeGame:
         pygame.display.flip()
 
     def _draw_world(self) -> None:
+        if self.levels.secret_3d:
+            self._draw_rift_backdrop()
         for platform in self.levels.all_platforms:
             platform.draw(self.screen, self.camera.x)
         for enemy in self.levels.enemies:
@@ -2769,13 +3485,72 @@ class MarioLikeGame:
         for slash in self.slashes:
             slash.draw(self.screen, self.camera.x)
         self.player.draw(self.screen, self.camera.x)
+        if self.levels.secret_3d:
+            self._draw_rift_foreground()
         for particle in self.particles:
             particle.draw(self.screen, self.camera.x)
+
+    def _draw_rift_backdrop(self) -> None:
+        grid_surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        vanish_y = max(80, SCREEN_HEIGHT // 3)
+        vanish_x = SCREEN_WIDTH // 2
+        base_y = SCREEN_HEIGHT + 160
+        spoke_colour = pygame.Color(80, 220, 255, 70)
+        for i in range(-6, 7):
+            if i == 0:
+                offset_factor = 0.0
+            else:
+                offset_factor = i / 6
+            end_x = vanish_x + int(offset_factor * SCREEN_WIDTH * 0.75)
+            pygame.draw.aaline(grid_surface, spoke_colour, (vanish_x, vanish_y), (end_x, base_y))
+
+        layer_count = 8
+        scroll = (self.rift_timer * 0.6) % 1.0
+        for idx in range(layer_count + 4):
+            t = (idx + scroll) / layer_count
+            while t > 1.0:
+                t -= 1.0
+            eased = t ** 1.6
+            y = int(lerp(vanish_y + 30, SCREEN_HEIGHT + 40, eased))
+            if y >= SCREEN_HEIGHT:
+                continue
+            alpha = max(15, 90 - int(eased * 100))
+            pygame.draw.line(
+                grid_surface,
+                (50, 200, 255, alpha),
+                (0, y),
+                (SCREEN_WIDTH, y),
+                1,
+            )
+        self.screen.blit(grid_surface, (0, 0))
+
+    def _draw_rift_foreground(self) -> None:
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        glow_height = 180
+        flux = (math.sin(self.rift_timer * 2.2) + 1) * 0.5
+        for i in range(glow_height):
+            blend = i / glow_height
+            alpha = int(70 * (1 - blend) * (0.6 + 0.4 * flux))
+            colour = (50, 230, 210, max(0, alpha))
+            pygame.draw.rect(
+                overlay,
+                colour,
+                (0, SCREEN_HEIGHT - i - 1, SCREEN_WIDTH, 1),
+            )
+        centre = (SCREEN_WIDTH // 2, SCREEN_HEIGHT - 48)
+        radius = SCREEN_WIDTH // 3
+        beam_colour = pygame.Color(180, 255, 255, 80)
+        for beam in range(5):
+            angle = self.secret_portal_phase + beam * (math.tau / 5)
+            end_x = centre[0] + int(math.cos(angle) * radius)
+            end_y = centre[1] - int(math.sin(angle) * (radius * 0.6)) - 160
+            pygame.draw.aaline(overlay, beam_colour, centre, (end_x, end_y))
+        self.screen.blit(overlay, (0, 0))
 
     def _draw_hud(self) -> None:
         draw_text(self.screen, f"Score: {self.score}", (20, 20))
         draw_text(self.screen, f"Level: {self.levels.level_index + 1}/{self.levels.total_levels}", (20, 60))
-        theme_name = BACKGROUND_THEMES[self.levels.theme_index]["name"]
+        theme_name = self.levels.secret_title or BACKGROUND_THEMES[self.levels.theme_index]["name"]
         heart_y = 110
         for i in range(self.max_lives):
             centre = (30 + i * 38, heart_y)
@@ -2788,10 +3563,18 @@ class MarioLikeGame:
         mode_colour = CRIMSON if self.hard_mode else CYAN
         draw_text(self.screen, f"Mode: {mode_label}", (20, heart_y + 64), colour=mode_colour)
         boss = self.levels.boss
-        if self.levels.is_boss_stage() and boss and not boss.defeated:
+        if self.levels.secret_3d:
             draw_text(
                 self.screen,
-                "Boss shrugs off stomps—grab swords and fire L-Shift beams!",
+                "Secret Level IV – Prismatic Rift",
+                (SCREEN_WIDTH // 2, 18),
+                colour=RIFT_TEAL,
+                anchor="midtop",
+            )
+        elif self.levels.is_boss_stage() and boss and not boss.defeated:
+            draw_text(
+                self.screen,
+                "Boss shrugs off stomps-grab swords and fire L-Shift beams!",
                 (SCREEN_WIDTH // 2, 18),
                 colour=NEON_GREEN,
                 anchor="midtop",
@@ -2886,10 +3669,33 @@ class MarioLikeGame:
         draw_text(self.screen, "Arrow keys / WASD to move, Space to jump", (SCREEN_WIDTH // 2, 360), anchor="center")
         draw_text(self.screen, "Collect all star shards before touching the flag!", (SCREEN_WIDTH // 2, 400), anchor="center")
         draw_text(self.screen, "Keep your hearts safe - three hits ends the run!", (SCREEN_WIDTH // 2, 440), anchor="center")
+        res_w, res_h = self.available_resolutions[self.resolution_index]
+        res_colour = CYAN if not self.fullscreen else GOLD
+        draw_text(
+            self.screen,
+            f"Resolution: {res_w} x {res_h}    (LEFT / RIGHT to change)",
+            (SCREEN_WIDTH // 2, 500),
+            colour=res_colour,
+            anchor="center",
+        )
+        display_label = "Display: Fullscreen" if self.fullscreen else "Display: Windowed"
+        draw_text(
+            self.screen,
+            f"{display_label}    (Press F to toggle)",
+            (SCREEN_WIDTH // 2, 540),
+            colour=SMOKE,
+            anchor="center",
+        )
         mode_text = "Hard Mode: ON" if self.hard_mode else "Hard Mode: OFF"
         mode_colour = CRIMSON if self.hard_mode else CYAN
-        draw_text(self.screen, mode_text, (SCREEN_WIDTH // 2, 500), colour=mode_colour, anchor="center")
-        draw_text(self.screen, "Press H to toggle Hard Mode", (SCREEN_WIDTH // 2, 540), colour=SMOKE, anchor="center")
+        mode_y = 580 if SCREEN_HEIGHT >= 640 else SCREEN_HEIGHT - 36
+        draw_text(
+            self.screen,
+            f"{mode_text}    (Press H to toggle)",
+            (SCREEN_WIDTH // 2, mode_y),
+            colour=mode_colour,
+            anchor="center",
+        )
 
     def _draw_pause_overlay(self) -> None:
         overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
@@ -2914,6 +3720,76 @@ class MarioLikeGame:
         draw_text(self.screen, f"Final Score: {self.score}", (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2), font=SUBTITLE_FONT, anchor="center")
         draw_text(self.screen, "Press ENTER to replay", (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 60), anchor="center")
 
+    def _draw_secret_prompt_overlay(self) -> None:
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((18, 10, 44, 160))
+        self.screen.blit(overlay, (0, 0))
+        headline_y = 140
+        draw_text(
+            self.screen,
+            "A prismatic rift flickers open…",
+            (SCREEN_WIDTH // 2, headline_y),
+            font=SUBTITLE_FONT,
+            colour=GOLD,
+            anchor="center",
+        )
+        sub_y = headline_y + 48
+        draw_text(
+            self.screen,
+            "Will you dive deeper or bask in victory?",
+            (SCREEN_WIDTH // 2, sub_y),
+            colour=SMOKE,
+            anchor="center",
+        )
+        if self.secret_portal_pos:
+            portal_x = int(self.secret_portal_pos.x - self.camera.x)
+            portal_y = int(self.secret_portal_pos.y)
+            pulse = 16 + int(8 * math.sin(self.secret_portal_phase * 2.6))
+            pygame.draw.circle(self.screen, CYAN, (portal_x, portal_y), pulse, 2)
+            pygame.draw.circle(self.screen, GOLD, (portal_x, portal_y), max(6, pulse // 2), 1)
+            for ring in range(3):
+                radius = pulse + 24 + ring * 18
+                alpha = max(20, 90 - ring * 25)
+                ring_surface = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
+                pygame.draw.circle(
+                    ring_surface,
+                    (120, 200, 255, alpha),
+                    (radius, radius),
+                    radius,
+                    2,
+                )
+                offset = (portal_x - radius, portal_y - radius)
+                self.screen.blit(ring_surface, offset)
+        option_y = SCREEN_HEIGHT - 200
+        if not self.secret_prompt_ready:
+            draw_text(
+                self.screen,
+                "The portal stabilises…",
+                (SCREEN_WIDTH // 2, option_y),
+                colour=SMOKE,
+                anchor="center",
+            )
+            draw_text(
+                self.screen,
+                "Hold tight!",
+                (SCREEN_WIDTH // 2, option_y + 32),
+                colour=CYAN,
+                anchor="center",
+            )
+            return
+        for index, label in enumerate(self.secret_choice_labels):
+            selected = index == self.secret_choice_index
+            colour = GOLD if selected else SMOKE
+            text = f"> {label} <" if selected else label
+            draw_text(self.screen, text, (SCREEN_WIDTH // 2, option_y + index * 44), colour=colour, anchor="center")
+        draw_text(
+            self.screen,
+            "Use LEFT / RIGHT to choose, ENTER to confirm",
+            (SCREEN_WIDTH // 2, option_y + 100),
+            colour=pygame.Color(200, 220, 255),
+            anchor="center",
+        )
+
     # ------------------------------ Events ------------------------------
     def handle_events(self) -> None:
         for event in pygame.event.get():
@@ -2926,11 +3802,26 @@ class MarioLikeGame:
                         self.pause()
                     elif self.state == GameState.PAUSED:
                         self.pause()
+                    elif self.state == GameState.SECRET_PROMPT:
+                        self._end_secret_prompt()
+                        self.victory()
                     elif self.state in (GameState.GAME_OVER, GameState.VICTORY):
                         self.state = GameState.MENU
                 elif event.key == pygame.K_RETURN:
                     if self.state in (GameState.MENU, GameState.GAME_OVER, GameState.VICTORY):
                         self.start_game()
+                    elif self.state == GameState.SECRET_PROMPT:
+                        self._confirm_secret_choice()
+                elif event.key in (pygame.K_LEFT, pygame.K_RIGHT):
+                    if self.state == GameState.SECRET_PROMPT:
+                        delta = -1 if event.key == pygame.K_LEFT else 1
+                        self._move_secret_choice(delta)
+                    elif self.state in (GameState.MENU, GameState.GAME_OVER, GameState.VICTORY):
+                        step = -1 if event.key == pygame.K_LEFT else 1
+                        self._change_resolution(step)
+                elif event.key == pygame.K_f:
+                    if self.state in (GameState.MENU, GameState.GAME_OVER, GameState.VICTORY):
+                        self._toggle_fullscreen()
                 elif event.key == pygame.K_h:
                     if self.state in (GameState.MENU, GameState.GAME_OVER, GameState.VICTORY, GameState.PAUSED):
                         self.hard_mode = not self.hard_mode
